@@ -85,13 +85,11 @@ def run_analysis(
     # --> user manually assign phases via the spreadsheet
     # TODO: use npw.phase_assignment_greedy(grid)
 
-    # load spreadsheet (power usage + phase) and add it to "grid" dictionnary
-    grid, cables_dict, has_no_phase, sh = npw.read_spreadsheet(
-        project_folder, grid, cables_dict, param["phase_balance_spreadsheet"]
-    )
-
-    # migrate electrical calculations to graph-first representation
+    # migrate to graph-first representation
     G = npw.build_graph_from_legacy(grid, cables_dict)
+    G, has_no_phase, sh = npw.read_spreadsheet(
+        project_folder, G, param["phase_balance_spreadsheet"]
+    )
     G = npw.cumulate_current(G, V0=V0, PF=PF)
     grid, cables_dict, dlist = npw.sync_legacy_from_graph(G, grid, cables_dict)
 
