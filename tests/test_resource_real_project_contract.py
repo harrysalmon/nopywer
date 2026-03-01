@@ -15,6 +15,7 @@ topology and optimization contracts on actual data.
 import contextlib
 import hashlib
 import os
+import sys
 import tempfile
 import unittest
 from collections import defaultdict, deque
@@ -52,6 +53,24 @@ class RealProjectContractTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+        # Earlier unit tests install a lightweight "fake qgis" stub into sys.modules.
+        # Remove it here so integration imports resolve against the real QGIS package.
+        qgis_mod = sys.modules.get("qgis")
+        if (qgis_mod is not None) and (not hasattr(qgis_mod, "__path__")):
+            for mod_name in list(sys.modules.keys()):
+                if (mod_name == "qgis") or mod_name.startswith("qgis."):
+                    del sys.modules[mod_name]
+
+        nopywer_mod = sys.modules.get("nopywer")
+        if nopywer_mod is not None:
+            module_file = getattr(nopywer_mod, "__file__", None)
+            if module_file is None:
+                for mod_name in list(sys.modules.keys()):
+                    if (mod_name == "nopywer") or mod_name.startswith("nopywer."):
+                        del sys.modules[mod_name]
+
         required = [
             RESOURCE_USER_PARAMETERS,
             RESOURCE_PROJECT_FILE,
