@@ -136,69 +136,6 @@ class MigrationConfidenceTests(unittest.TestCase):
 
         self.assertIn("infinite loop", str(ctx.exception).lower())
 
-    def test_cumulate_current_preserves_numeric_balance(self):
-        cables = {"L": [DummyCable(), DummyCable()]}
-        grid = {
-            "generator": DummyNode("generator", power=[0, 0, 0]),
-            "a": DummyNode(
-                "a",
-                parent="generator",
-                power=[900.0, 0.0, 0.0],
-                cable={"layer": "L", "idx": 0},
-            ),
-            "b": DummyNode(
-                "b",
-                parent="a",
-                power=[0.0, 450.0, 0.0],
-                cable={"layer": "L", "idx": 1},
-            ),
-        }
-        dlist = [["generator"], ["a"], ["b"]]
-
-        grid, cables = cumulate_current_mod.cumulate_current(
-            grid=grid, cables_dict=cables, dlist=dlist, V0=230.0, PF=0.9
-        )
-
-        np.testing.assert_allclose(grid["b"].cum_power, [0.0, 450.0, 0.0], rtol=0, atol=1e-9)
-        np.testing.assert_allclose(grid["a"].cum_power, [900.0, 450.0, 0.0], rtol=0, atol=1e-9)
-        np.testing.assert_allclose(
-            grid["generator"].cum_power, [900.0, 450.0, 0.0], rtol=0, atol=1e-9
-        )
-        np.testing.assert_allclose(
-            cables["L"][1].current, np.array([0.0, 450.0, 0.0]) / 230.0 / 0.9, rtol=0, atol=1e-9
-        )
-        np.testing.assert_allclose(
-            cables["L"][0].current, np.array([900.0, 450.0, 0.0]) / 230.0 / 0.9, rtol=0, atol=1e-9
-        )
-
-    def test_compute_voltage_drop_matches_reference_formula(self):
-        cables = {
-            "L": [
-                DummyCable(r=0.5, current=[2.0, 1.0, 0.0]),
-                DummyCable(r=1.0, current=[3.0, 0.0, 0.0]),
-            ]
-        }
-        grid = {
-            "generator": DummyNode("generator", parent=None),
-            "a": DummyNode("a", parent="generator", cable={"layer": "L", "idx": 0}),
-            "b": DummyNode("b", parent="a", cable={"layer": "L", "idx": 1}),
-        }
-        grid["generator"].children = {"a": {"cable": {"layer": "L", "idx": 0}}}
-        grid["a"].children = {"b": {"cable": {"layer": "L", "idx": 1}}}
-
-        grid, cables = compute_voltage_drop_mod.compute_voltage_drop(grid, cables)
-
-        vdrop_ref = math.sqrt(3) * 230.0
-        expected_v_a = 230.0 - 0.5 * 2.0
-        expected_v_b = expected_v_a - 1.0 * 3.0
-
-        self.assertAlmostEqual(cables["L"][0].vdrop_volts, 1.0, places=9)
-        self.assertAlmostEqual(cables["L"][1].vdrop_volts, 3.0, places=9)
-        self.assertAlmostEqual(grid["a"].voltage, expected_v_a, places=9)
-        self.assertAlmostEqual(grid["b"].voltage, expected_v_b, places=9)
-        self.assertAlmostEqual(grid["a"].vdrop_percent, 100.0 * (230.0 - expected_v_a) / vdrop_ref)
-        self.assertAlmostEqual(grid["b"].vdrop_percent, 100.0 * (230.0 - expected_v_b) / vdrop_ref)
-
     def test_find_optimal_layout_enforces_tree_constraints_on_toy_graph(self):
         nodes = {
             "A": {"power": 10.0, "cum_power": None, "x": 1.0, "y": 1.0},

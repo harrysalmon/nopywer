@@ -1,29 +1,42 @@
+"""Forward voltage-drop sweep on the graph runtime model."""
+
 import numpy as np
+
 from .get_constant_parameters import get_constant_parameters
 
 try:
     import networkx as nx
-except Exception:
+except Exception as exc:  # pragma: no cover - dependency import guard
     nx = None
+    _NETWORKX_ERROR = exc
+else:
+    _NETWORKX_ERROR = None
 
-# --- constant data
-th_percent = 5  # vdrop threshold in %, above with a message is printed
+# vdrop threshold in %, above which a warning is printed
+THRESHOLD_PERCENT = 5
 CONSTANTS = get_constant_parameters()
 V0 = CONSTANTS["V0"]
+VDROP_REF = np.sqrt(3) * V0
+VDROP_COEF = 1
 
 
-# --- parameters
-vdrop_ref = np.sqrt(3) * V0
-vdrop_coef = 1  # np.sqrt(3) # todo: change coef for 1-phase vs 3-phase https://drive.google.com/file/d/14_rlY05iPmopzXP5nSGixhvf_KH9mJ0p/view
+def compute_voltage_drop(G, root: str = "generator"):
+    """Compute per-edge voltage drop and per-node voltage on the graph.
 
-verbose = 0
+    Args:
+        G: Directed graph with ``edge['resistance']`` and ``edge['current']``.
+        root: Root source node for traversal, typically ``generator``.
 
-
-def _is_graph(obj) -> bool:
-    return (nx is not None) and isinstance(obj, nx.Graph)
-
-
-def compute_voltage_drop_graph(G, root: str = "generator"):
+    Returns:
+        The same graph instance with updated ``edge['vdrop_volts']``,
+        ``node['voltage']``, and ``node['vdrop_percent']`` attributes.
+    """
+    if nx is None:
+        raise ImportError(
+            f"networkx is required for compute_voltage_drop: {_NETWORKX_ERROR}"
+        )
+    if not isinstance(G, nx.Graph):
+        raise TypeError("compute_voltage_drop expects a NetworkX graph")
     if root not in G:
         return G
 
@@ -39,51 +52,14 @@ def compute_voltage_drop_graph(G, root: str = "generator"):
         resistance = float(edge.get("resistance", 0.0))
         current = edge.get("current", []) or []
         max_current = float(np.max(current)) if len(current) > 0 else 0.0
-        edge["vdrop_volts"] = float(vdrop_coef * resistance * max_current)
+        edge["vdrop_volts"] = float(VDROP_COEF * resistance * max_current)
 
         G.nodes[load]["voltage"] = float(G.nodes[parent]["voltage"] - edge["vdrop_volts"])
-        G.nodes[load]["vdrop_percent"] = float(100 * (V0 - G.nodes[load]["voltage"]) / vdrop_ref)
+        G.nodes[load]["vdrop_percent"] = float(
+            100 * (V0 - G.nodes[load]["voltage"]) / VDROP_REF
+        )
 
-        if G.nodes[load]["vdrop_percent"] > th_percent:
+        if G.nodes[load]["vdrop_percent"] > THRESHOLD_PERCENT:
             print(f"\t /!\\ vdrop of {G.nodes[load]['vdrop_percent']:.1f} percent at {load}")
 
     return G
-
-
-def compute_voltage_drop(grid: dict, cables_dict: dict = None, load=None):
-    if _is_graph(grid):
-        return compute_voltage_drop_graph(grid)
-
-    # load is supposed to be a string
-    verbose = 0
-    if verbose:
-        print(f"\n\t propagating vdrop to {load}")
-
-    if load == None:  # first call of the function. no vdrop at generator
-        load = "generator"
-        grid[load].voltage = V0
-        grid[load].vdrop_percent = 0.0
-
-    else:  # compute vdrop at load
-        parent = grid[load].parent
-        cable = cables_dict[grid[load].cable["layer"]][grid[load].cable["idx"]]
-
-        cable.vdrop_volts = vdrop_coef * cable.r * np.max(cable.current)
-        grid[load].voltage = grid[parent].voltage - cable.vdrop_volts
-        grid[load].vdrop_percent = 100 * (V0 - grid[load].voltage) / vdrop_ref
-
-        if verbose:
-            print(f"\t\t cable: length {cable.length:.0f}m, area: {cable.area:.1f}mm²")
-            print(f"\t\t grid[parent]['voltage']: {grid[parent].voltage:.0f}V")
-            print(f"\t\t grid[load]['voltage']: {grid[load].voltage:.0f}V")
-            print(f"\t\t grid[load]['vdrop_percent']: {grid[load].vdrop_percent:.1f}%")
-
-        if grid[load].vdrop_percent > th_percent:
-            print(f"\t /!\\ vdrop of {grid[load].vdrop_percent:.1f} percent at {load}")
-
-    # recursive call
-    children = grid[load].children.keys()
-    for child in children:
-        [grid, cables_dict] = compute_voltage_drop(grid, cables_dict, child)
-
-    return grid, cables_dict

@@ -244,25 +244,6 @@ def find_connections(
     return nodes_dict, cables_dict
 
 
-def compute_deepness_list(grid):
-    """Legacy helper: compute node names grouped by precomputed deepness."""
-    # --- sort loads by deepness
-    dmax = 0
-    for load in grid.keys():  # find max deepness
-        deepness = grid[load].deepness
-        if deepness is not None:
-            dmax = max(dmax, grid[load].deepness)
-
-    dlist = [None] * (dmax + 1)
-    for load in grid.keys():
-        deepness = grid[load].deepness
-        if deepness is not None:
-            if dlist[deepness] is None:
-                dlist[deepness] = []
-            dlist[deepness].append(load)
-    return dlist
-
-
 def _build_graph_from_connections(
     nodes_dict: dict, cables_dict: dict, root: str = "generator"
 ):
@@ -352,44 +333,30 @@ def _build_graph_from_connections(
     return G
 
 
-def compute_distro_requirements(grid, cables_dict):
-    """Compute incoming/outgoing distro requirements for each node.
+def compute_distro_requirements(G):
+    """Compute incoming/outgoing distro requirements for each graph node.
 
-    Graph mode is the primary path. The legacy dict path is kept as fallback.
-    This should be run after cable layers were inspected so plug ratings are set.
+    This should run after ``inspect_cable_layers`` so edge plug/socket ratings are
+    populated.
     """
-    if (nx is not None) and isinstance(grid, nx.Graph):
-        G = grid
-        verbose = 0
-        print("\ncompute_distro_requirements...")
+    if (nx is None) or (not isinstance(G, nx.Graph)):
+        raise TypeError("compute_distro_requirements expects a NetworkX graph")
 
-        for load_name in G.nodes:
-            distro = {"in": None, "out": {}}
+    verbose = 0
+    print("\ncompute_distro_requirements...")
+    for load_name in G.nodes:
+        distro = {"in": None, "out": {}}
 
-            if load_name == "generator":
-                distro["in"] = "3P 125A"
-            else:
-                parents = list(G.predecessors(load_name))
-                if parents:
-                    parent = parents[0]
-                    edge = G.edges[parent, load_name]
-                    layer_name = edge.get("layer_name", "")
-                    if "3phases" in layer_name:
-                        ph = "3P"
-                    elif "1phase" in layer_name:
-                        ph = "1P"
-                    else:
-                        ph = "?"
-                        print("\t\t\t can't figure out if this cable is 3P or 1P")
+        if verbose:
+            print(f"\n\t\t {load_name}:")
 
-                    if edge.get("plugs_and_sockets", None) is None:
-                        raise ValueError(
-                            "cable2parent.plugs_and_sockets is None, run inspect_cable_layer?"
-                        )
-                    distro["in"] = f"{ph} {edge['plugs_and_sockets']}A"
-
-            for _, child in G.out_edges(load_name):
-                edge = G.edges[load_name, child]
+        if load_name == "generator":
+            distro["in"] = "3P 125A"
+        else:
+            parents = list(G.predecessors(load_name))
+            if parents:
+                parent = parents[0]
+                edge = G.edges[parent, load_name]
                 layer_name = edge.get("layer_name", "")
                 if "3phases" in layer_name:
                     ph = "3P"
@@ -399,83 +366,39 @@ def compute_distro_requirements(grid, cables_dict):
                     ph = "?"
                     print("\t\t\t can't figure out if this cable is 3P or 1P")
 
-                rating = f"{edge.get('plugs_and_sockets', '?')}A"
-                desc = f"{ph} {rating}"
-                if desc not in distro["out"]:
-                    distro["out"][desc] = 1
-                else:
-                    distro["out"][desc] += 1
+                if edge.get("plugs_and_sockets", None) is None:
+                    raise ValueError(
+                        "cable2parent.plugs_and_sockets is None, run inspect_cable_layer?"
+                    )
+                distro["in"] = f"{ph} {edge['plugs_and_sockets']}A"
 
-            if verbose:
-                print(f"\t\t\t in: {distro['in']}")
-                print("\t\t\t out: ")
-                for desc in distro["out"].keys():
-                    print(f"\t\t\t\t {desc}: {distro['out'][desc]}")
-
-            G.nodes[load_name]["distro"] = distro
-
-        return G
-
-    verbose = 0
-    print("\ncompute_distro_requirements...")
-    for load in grid.values():
-        if verbose:
-            print(f"\n\t\t {load.name}:")
-
-        # --- checking input...
-        if (load.parent is not None) and (len(load.parent) > 0):
-            cable2parent_ref = load.cable
-            cable2parent = cables_dict[cable2parent_ref["layer"]][
-                cable2parent_ref["idx"]
-            ]
-            if "3phases" in cable2parent_ref["layer"]:
+        for _, child in G.out_edges(load_name):
+            edge = G.edges[load_name, child]
+            layer_name = edge.get("layer_name", "")
+            if "3phases" in layer_name:
                 ph = "3P"
-            elif "1phase" in cable2parent_ref["layer"]:
+            elif "1phase" in layer_name:
                 ph = "1P"
             else:
+                ph = "?"
                 print("\t\t\t can't figure out if this cable is 3P or 1P")
 
-            if cable2parent.plugs_and_sockets is None:
-                raise ValueError(
-                    "cable2parent.plugs_and_sockets is None, run inspect_cable_layer?"
-                )
+            rating = f"{edge.get('plugs_and_sockets', '?')}A"
+            desc = f"{ph} {rating}"
+            if desc not in distro["out"]:
+                distro["out"][desc] = 1
             else:
-                load.distro["in"] = f"{ph} {cable2parent.plugs_and_sockets}A"
-
-        elif load == "generator":
-            load.distro["in"] = "3P 125A"
-
-        # --- checking output...
-        load.distro["out"] = {}
-        if load.children is not None:
-            cables2children_ref = [
-                load.children[child]["cable"] for child in load.children
-            ]
-            cables2children = [
-                cables_dict[c["layer"]][c["idx"]] for c in cables2children_ref
-            ]
-            for idx, cable in enumerate(cables2children):
-                if "3phases" in cables2children_ref[idx]["layer"]:
-                    ph = "3P"
-                elif "1phase" in cables2children_ref[idx]["layer"]:
-                    ph = "1P"
-                else:
-                    print("\t\t\t can't figure out if this cable is 3P or 1P")
-
-                rating = f"{cable.plugs_and_sockets}A"
-                desc = f"{ph} {rating}"
-                if desc not in load.distro["out"]:
-                    load.distro["out"][desc] = 1
-                else:
-                    load.distro["out"][desc] += 1
+                distro["out"][desc] += 1
 
         if verbose:
-            print(f"\t\t\t in: {load.distro['in']}")
+            print(f"\t\t\t in: {distro['in']}")
             print("\t\t\t out: ")
-            for desc in load.distro["out"].keys():
-                print(f"\t\t\t\t {desc}: {load.distro['out'][desc]}")
+            for desc in distro["out"].keys():
+                print(f"\t\t\t\t {desc}: {distro['out'][desc]}")
 
-    return grid
+        G.nodes[load_name]["distro"] = distro
+
+    return G
 
 
 def get_grid_geometry(project, param: dict):

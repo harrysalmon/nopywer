@@ -105,7 +105,7 @@ def run_analysis(
     )
 
     G = npw.inspect_cable_layers(qgs_project, cables_layers_list, G)
-    G = npw.compute_distro_requirements(G, None)
+    G = npw.compute_distro_requirements(G)
 
     print("\ncomputingVDrop...")
     G = npw.compute_voltage_drop(G)
@@ -114,7 +114,7 @@ def run_analysis(
     npw.choose_cables_in_inventory(project_folder, G, param["inventory"])
     npw.choose_distros_in_inventory(project_folder, G, param["inventory"])
 
-    npw.print_grid_info(G, None, phase_balance, has_no_phase, None)
+    npw.print_grid_info(G, phase_balance, has_no_phase)
 
     if param["update"]["qgis_layers"]:
         npw.update_1phase_layers(G, qgs_project)

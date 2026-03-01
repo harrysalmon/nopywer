@@ -27,4 +27,4 @@ from .compute_voltage_drop import compute_voltage_drop
 from .print_grid_info import print_grid_info
 from .update_layers import update_1phase_layers, update_load_layers
 from .write_spreadsheet import write_spreadsheet
-from .graph_model import build_graph_from_legacy, sync_legacy_from_graph, depth_list_from_graph
+from .graph_model import depth_list_from_graph

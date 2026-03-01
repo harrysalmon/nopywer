@@ -1,41 +1,36 @@
+"""Spreadsheet writer for graph-based analysis outputs."""
+
 import numpy as np
 import pandas as pd
 
 try:
     import networkx as nx
-except Exception:
+except Exception as exc:  # pragma: no cover - dependency import guard
     nx = None
+    _NETWORKX_ERROR = exc
+else:
+    _NETWORKX_ERROR = None
 
 
-def write_spreadsheet(grid: dict, sh):
+def write_spreadsheet(G, sh) -> None:
+    """Write cumulated power columns and grouped tabs from graph attributes.
+
+    Args:
+        G: Directed runtime graph with per-node ``cum_power`` and edge metadata.
+        sh: Original phase-balance spreadsheet DataFrame.
     """
-    - build 2 pd dataFrames (norg vs art), with:
-        - the input spreadsheet (to have all loads sharing one loc)
-            - phase
-            - power / current
-
-        - the grid dict
-            - add cum_power if load exist (eg not for Spoonhaus)
-            - add nodes without loads (eg malfarenode)
-    """
+    if nx is None:
+        raise ImportError(f"networkx is required for write_spreadsheet: {_NETWORKX_ERROR}")
+    if not isinstance(G, nx.Graph):
+        raise TypeError("write_spreadsheet expects a NetworkX graph")
 
     print("write_spreadsheet...")
 
-    verbose = 0
-    # start from the input spreadsheet, and...
-    # ... drop unnmamed cols https://stackoverflow.com/questions/43983622/remove-unnamed-columns-in-pandas-dataframe
-    sh = sh.loc[
-        :, ~sh.columns.str.contains("^Unnamed")
-    ]  # TODO: move in read_spreadsheet ?
+    # Drop unnamed columns from spreadsheet import.
+    sh = sh.loc[:, ~sh.columns.str.contains("^Unnamed")]
 
-    # ... drop useless cols, and rename others
-    # TODO: test if column exist before using them
-    #       and don't try to remove cols that do not exist ....
-    #       -> a good thing would be to test which cols are in the sh at the very beginning and warn the user if the required cols are not present
-    #       Also: document more clearly what "updating spreadsheet" means (maybe write functions to ease write_spreadsheet() understanding ?)
-    sh = sh.drop(
-        columns=["Arrive", "Depart", "daytime power [W]", "nighttime power [W]"]
-    )
+    # Keep only relevant fields and normalize column names for output report.
+    sh = sh.drop(columns=["Arrive", "Depart", "daytime power [W]", "nighttime power [W]"])
     sh = sh.rename(
         columns={
             "worstcase power [W]": "power [W]",
@@ -43,78 +38,20 @@ def write_spreadsheet(grid: dict, sh):
         }
     )
 
-    sh = sh[sh["power [W]"] != 0]  # drop rows not requiring power (art pieces)
+    # Drop rows without active power demand.
+    sh = sh[sh["power [W]"] != 0]
 
-    if (nx is not None) and isinstance(grid, nx.Graph):
-        G = grid
-
-        for l in range(3):
-            sh[f"cumulated power L{l + 1} [kW]"] = "NA"
-
-        for load_on_map in G.nodes():
-            idx = [load_on_map in name_on_sheet.lower() for name_on_sheet in sh["Project"]]
-            cum = np.array(G.nodes[load_on_map]["cum_power"], dtype=float)
-            for l in range(3):
-                sh.loc[idx, f"cumulated power L{l + 1} [kW]"] = 1e-3 * cum[l]
-
-            has_parent = G.in_degree(load_on_map) > 0
-            if (any(idx) is False) and has_parent:
-                tmp_dict = {
-                    "Project": load_on_map,
-                    "power [W]": 0,
-                    "current [A]": 0,
-                    "phase": "NA",
-                }
-                for l in range(3):
-                    tmp_dict[f"cumulated power L{l + 1} [kW]"] = 1e-3 * cum[l]
-
-                sh = pd.concat([sh, pd.DataFrame(tmp_dict, index=[0])], ignore_index=True)
-
-        sh["Project"] = [str(i).lower() for i in sh["Project"]]
-        sh = sh.sort_values("Project")
-
-        norg_loads = []
-        for idx, load_on_sheet in enumerate(sh["Project"]):
-            is_on_map = [load_on_map for load_on_map in G.nodes() if load_on_map in load_on_sheet.lower()]
-            if len(is_on_map) == 1:
-                load_on_map = is_on_map[0]
-            elif len(is_on_map) > 1:
-                load_on_map = [name for name in is_on_map if name == load_on_sheet][0]
-            else:
-                load_on_map = None
-
-            if (load_on_map is not None) and (G.in_degree(load_on_map) > 0):
-                parent = list(G.predecessors(load_on_map))[0]
-                cable_layer = G.edges[parent, load_on_map].get("layer_name", "")
-                if "norg" in cable_layer:
-                    norg_loads.append(idx)
-
-        other_loads = [i for j, i in enumerate(range(len(sh))) if j not in norg_loads]
-        df_norg = sh.iloc[norg_loads, :]
-        df_others = sh.iloc[other_loads, :]
-
-        with pd.ExcelWriter("output.ods") as writer:
-            sh.to_excel(writer, sheet_name="all", index=False)
-            df_norg.to_excel(writer, sheet_name="norg", index=False)
-            df_others.to_excel(writer, sheet_name="other", index=False)
-
-        return None
-
-    # ... add extra info from map
     for l in range(3):
-        sh[f"cumulated power L{l + 1} [kW]"] = "NA"  # init columns
+        sh[f"cumulated power L{l + 1} [kW]"] = "NA"
 
-    for load_on_map in grid.keys():
-        # cum_power from grid dict...
+    for load_on_map in G.nodes():
         idx = [load_on_map in name_on_sheet.lower() for name_on_sheet in sh["Project"]]
-        if isinstance(grid[load_on_map]["cum_power"], np.ndarray):
-            for l in range(3):
-                sh.loc[idx, f"cumulated power L{l + 1} [kW]"] = (
-                    1e-3 * grid[load_on_map]["cum_power"][l]
-                )
+        cum = np.array(G.nodes[load_on_map]["cum_power"], dtype=float)
+        for l in range(3):
+            sh.loc[idx, f"cumulated power L{l + 1} [kW]"] = 1e-3 * cum[l]
 
-        # even if load is on map, but not on input spreadsheets, and has a parent (eg, nodes)
-        if (any(idx) == False) and (len(grid[load_on_map]["parent"]) > 0):
+        has_parent = G.in_degree(load_on_map) > 0
+        if (not any(idx)) and has_parent:
             tmp_dict = {
                 "Project": load_on_map,
                 "power [W]": 0,
@@ -122,37 +59,27 @@ def write_spreadsheet(grid: dict, sh):
                 "phase": "NA",
             }
             for l in range(3):
-                tmp_dict[f"cumulated power L{l + 1} [kW]"] = (
-                    1e-3 * grid[load_on_map]["cum_power"][l]
-                )
+                tmp_dict[f"cumulated power L{l + 1} [kW]"] = 1e-3 * cum[l]
+            sh = pd.concat([sh, pd.DataFrame(tmp_dict, index=[0])], ignore_index=True)
 
-            sh = sh.append(pd.DataFrame(tmp_dict, index=[0]))
-
-    # convert all names to lower case and sort alphabetically
     sh["Project"] = [str(i).lower() for i in sh["Project"]]
     sh = sh.sort_values("Project")
 
-    # separate "norg" and "others" tab
     norg_loads = []
-    other_loads = []
     for idx, load_on_sheet in enumerate(sh["Project"]):
         is_on_map = [
-            load_on_map
-            for load_on_map in grid.keys()
-            if load_on_map in load_on_sheet.lower()
+            load_on_map for load_on_map in G.nodes() if load_on_map in load_on_sheet.lower()
         ]
-
         if len(is_on_map) == 1:
             load_on_map = is_on_map[0]
-
         elif len(is_on_map) > 1:
             load_on_map = [name for name in is_on_map if name == load_on_sheet][0]
-
         else:
             load_on_map = None
 
-        if (load_on_map != None) and (grid[load_on_map]["parent"] != None):
-            cable_layer = grid[load_on_map]["cable"]["layer"]
+        if (load_on_map is not None) and (G.in_degree(load_on_map) > 0):
+            parent = list(G.predecessors(load_on_map))[0]
+            cable_layer = G.edges[parent, load_on_map].get("layer_name", "")
             if "norg" in cable_layer:
                 norg_loads.append(idx)
 
@@ -160,21 +87,7 @@ def write_spreadsheet(grid: dict, sh):
     df_norg = sh.iloc[norg_loads, :]
     df_others = sh.iloc[other_loads, :]
 
-    if verbose:
-        print(f"norg loads: {norg_loads}")
-        print(f"other_loads: {other_loads}")
-        with pd.option_context(
-            "display.max_rows", None, "display.max_columns", None
-        ):  # more options can be specified also
-            print(sh)
-            print("splitted:")
-            print(df_norg)
-            print(df_others)
-
-    # ... create a excel writer object and write file
     with pd.ExcelWriter("output.ods") as writer:
         sh.to_excel(writer, sheet_name="all", index=False)
         df_norg.to_excel(writer, sheet_name="norg", index=False)
         df_others.to_excel(writer, sheet_name="other", index=False)
-
-    return None
