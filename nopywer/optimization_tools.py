@@ -31,6 +31,10 @@ else:
     _PLOT_STACK_ERROR = _MATPLOTLIB_ERROR or _NETWORKX_ERROR
 
 
+def _is_graph(obj) -> bool:
+    return (nx is not None) and isinstance(obj, nx.Graph)
+
+
 def _get_node_value(node, key):
     if isinstance(node, dict):
         return node[key]
@@ -110,24 +114,56 @@ def qgis2list(grid):
     # define all possible edges
     edges = []  # list of ('source', 'dest', distance)
     nodes = {}
-    qgsDist = (
-        QgsDistanceArea()
-    )  # https://qgis.org/pyqgis/3.22/core/QgsDistanceArea.html
-    for src_name, source in grid.items():
-        src_coord = _get_node_value(source, "coordinates")
-        nodes[src_name] = {
-            "power": _get_node_value(source, "power"),
-            "cum_power": _get_node_value(source, "cum_power"),
-            "x": src_coord.x(),  # https://qgis.org/pyqgis/3.38/core/QgsPointXY.html
-            "y": src_coord.y(),
-        }
+    qgsDist = QgsDistanceArea()
 
-        for dst_name, dest in grid.items():
-            if src_name != dst_name:
+    if _is_graph(grid):
+        node_items = list(grid.nodes(data=True))
+    else:
+        node_items = list(grid.items())
+
+    for src_name, source in node_items:
+        if _is_graph(grid):
+            src_coord = source.get("coordinates", None)
+            src_x, src_y = source.get("x", None), source.get("y", None)
+            nodes[src_name] = {
+                "power": source.get("power"),
+                "cum_power": source.get("cum_power"),
+                "x": src_x,
+                "y": src_y,
+            }
+        else:
+            src_coord = _get_node_value(source, "coordinates")
+            nodes[src_name] = {
+                "power": _get_node_value(source, "power"),
+                "cum_power": _get_node_value(source, "cum_power"),
+                "x": src_coord.x(),
+                "y": src_coord.y(),
+            }
+
+        for dst_name, dest in node_items:
+            if src_name == dst_name:
+                continue
+
+            if _is_graph(grid):
+                dst_coord = dest.get("coordinates", None)
+                if (src_coord is not None) and (dst_coord is not None):
+                    dist = qgsDist.measureLine(src_coord, dst_coord)
+                else:
+                    src_x = nodes[src_name]["x"]
+                    src_y = nodes[src_name]["y"]
+                    dst_x = dest.get("x")
+                    dst_y = dest.get("y")
+                    if None in (src_x, src_y, dst_x, dst_y):
+                        dist = 0.0
+                    else:
+                        dx = float(src_x - dst_x)
+                        dy = float(src_y - dst_y)
+                        dist = (dx * dx + dy * dy) ** 0.5
+            else:
                 dst_coord = _get_node_value(dest, "coordinates")
                 dist = qgsDist.measureLine(src_coord, dst_coord)
-                edges.append((src_name, dst_name, dist))
-                # print(f'{source}-{dest} dist = {dist:.0f} m')
+
+            edges.append((src_name, dst_name, dist))
 
     with open("grid.pkl", "wb") as f:
         pickle.dump([nodes, edges], f)

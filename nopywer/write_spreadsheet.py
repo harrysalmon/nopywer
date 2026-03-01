@@ -1,6 +1,11 @@
 import numpy as np
 import pandas as pd
 
+try:
+    import networkx as nx
+except Exception:
+    nx = None
+
 
 def write_spreadsheet(grid: dict, sh):
     """
@@ -39,6 +44,61 @@ def write_spreadsheet(grid: dict, sh):
     )
 
     sh = sh[sh["power [W]"] != 0]  # drop rows not requiring power (art pieces)
+
+    if (nx is not None) and isinstance(grid, nx.Graph):
+        G = grid
+
+        for l in range(3):
+            sh[f"cumulated power L{l + 1} [kW]"] = "NA"
+
+        for load_on_map in G.nodes():
+            idx = [load_on_map in name_on_sheet.lower() for name_on_sheet in sh["Project"]]
+            cum = np.array(G.nodes[load_on_map]["cum_power"], dtype=float)
+            for l in range(3):
+                sh.loc[idx, f"cumulated power L{l + 1} [kW]"] = 1e-3 * cum[l]
+
+            has_parent = G.in_degree(load_on_map) > 0
+            if (any(idx) is False) and has_parent:
+                tmp_dict = {
+                    "Project": load_on_map,
+                    "power [W]": 0,
+                    "current [A]": 0,
+                    "phase": "NA",
+                }
+                for l in range(3):
+                    tmp_dict[f"cumulated power L{l + 1} [kW]"] = 1e-3 * cum[l]
+
+                sh = pd.concat([sh, pd.DataFrame(tmp_dict, index=[0])], ignore_index=True)
+
+        sh["Project"] = [str(i).lower() for i in sh["Project"]]
+        sh = sh.sort_values("Project")
+
+        norg_loads = []
+        for idx, load_on_sheet in enumerate(sh["Project"]):
+            is_on_map = [load_on_map for load_on_map in G.nodes() if load_on_map in load_on_sheet.lower()]
+            if len(is_on_map) == 1:
+                load_on_map = is_on_map[0]
+            elif len(is_on_map) > 1:
+                load_on_map = [name for name in is_on_map if name == load_on_sheet][0]
+            else:
+                load_on_map = None
+
+            if (load_on_map is not None) and (G.in_degree(load_on_map) > 0):
+                parent = list(G.predecessors(load_on_map))[0]
+                cable_layer = G.edges[parent, load_on_map].get("layer_name", "")
+                if "norg" in cable_layer:
+                    norg_loads.append(idx)
+
+        other_loads = [i for j, i in enumerate(range(len(sh))) if j not in norg_loads]
+        df_norg = sh.iloc[norg_loads, :]
+        df_others = sh.iloc[other_loads, :]
+
+        with pd.ExcelWriter("output.ods") as writer:
+            sh.to_excel(writer, sheet_name="all", index=False)
+            df_norg.to_excel(writer, sheet_name="norg", index=False)
+            df_others.to_excel(writer, sheet_name="other", index=False)
+
+        return None
 
     # ... add extra info from map
     for l in range(3):

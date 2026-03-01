@@ -39,6 +39,11 @@ from .core_objects import Cable, Node
 import traceback
 import logging
 
+try:
+    import networkx as nx
+except Exception:
+    nx = None
+
 thres = 5  # [meters] threshold to detect cable and load connection
 verbose = 0
 
@@ -247,6 +252,64 @@ def compute_deepness_list(grid):
 
 def compute_distro_requirements(grid, cables_dict):
     """must be run after 'inspect_cable_layer'"""
+    if (nx is not None) and isinstance(grid, nx.Graph):
+        G = grid
+        verbose = 0
+        print("\ncompute_distro_requirements...")
+
+        for load_name in G.nodes:
+            distro = {"in": None, "out": {}}
+
+            if load_name == "generator":
+                distro["in"] = "3P 125A"
+            else:
+                parents = list(G.predecessors(load_name))
+                if parents:
+                    parent = parents[0]
+                    edge = G.edges[parent, load_name]
+                    layer_name = edge.get("layer_name", "")
+                    if "3phases" in layer_name:
+                        ph = "3P"
+                    elif "1phase" in layer_name:
+                        ph = "1P"
+                    else:
+                        ph = "?"
+                        print("\t\t\t can't figure out if this cable is 3P or 1P")
+
+                    if edge.get("plugs_and_sockets", None) is None:
+                        raise ValueError(
+                            "cable2parent.plugs_and_sockets is None, run inspect_cable_layer?"
+                        )
+                    distro["in"] = f"{ph} {edge['plugs_and_sockets']}A"
+
+            for _, child in G.out_edges(load_name):
+                edge = G.edges[load_name, child]
+                layer_name = edge.get("layer_name", "")
+                if "3phases" in layer_name:
+                    ph = "3P"
+                elif "1phase" in layer_name:
+                    ph = "1P"
+                else:
+                    ph = "?"
+                    print("\t\t\t can't figure out if this cable is 3P or 1P")
+
+                rating = f"{edge.get('plugs_and_sockets', '?')}A"
+                desc = f"{ph} {rating}"
+                if desc not in distro["out"]:
+                    distro["out"][desc] = 1
+                else:
+                    distro["out"][desc] += 1
+
+            if verbose:
+                print(f"\t\t\t in: {distro['in']}")
+                print("\t\t\t out: ")
+                for desc in distro["out"].keys():
+                    print(f"\t\t\t\t {desc}: {distro['out'][desc]}")
+
+            G.nodes[load_name]["distro"] = distro
+
+        return G
+
     verbose = 0
     print("\ncompute_distro_requirements...")
     for load in grid.values():

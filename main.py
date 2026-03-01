@@ -71,7 +71,7 @@ def load_qgis_project(
 
 def run_analysis(
     qgs_project: QgsProject, project_folder: str, param: dict
-) -> tuple[dict, dict]:
+) -> object:
     # constant data (global variables)
     CONSTANTS = npw.get_constant_parameters()
     V0 = CONSTANTS["V0"]
@@ -79,50 +79,46 @@ def run_analysis(
     cables_layers_list = param["cables_layers_list"]
 
     # find grid geometry
-    cables_dict, grid, dlist = npw.get_grid_geometry(qgs_project, param)
+    cables_dict, grid, _dlist_legacy = npw.get_grid_geometry(qgs_project, param)
 
     # spreadsheet: assign phases
     # --> user manually assign phases via the spreadsheet
     # TODO: use npw.phase_assignment_greedy(grid)
 
-    # migrate to graph-first representation
+    # canonical runtime model: graph with node/edge electrical attributes
     G = npw.build_graph_from_legacy(grid, cables_dict)
     G, has_no_phase, sh = npw.read_spreadsheet(
         project_folder, G, param["phase_balance_spreadsheet"]
     )
     G = npw.cumulate_current(G, V0=V0, PF=PF)
-    grid, cables_dict, dlist = npw.sync_legacy_from_graph(G, grid, cables_dict)
 
     phase_balance = 100 * np.std(
         G.nodes["generator"]["cum_power"] / np.mean(G.nodes["generator"]["cum_power"])
     )
 
-    cables_dict = npw.inspect_cable_layers(qgs_project, cables_layers_list, cables_dict)
-    grid = npw.compute_distro_requirements(grid, cables_dict)
+    G = npw.inspect_cable_layers(qgs_project, cables_layers_list, G)
+    G = npw.compute_distro_requirements(G, None)
 
     print("\ncomputingVDrop...")
-    # rebuild graph so updated distro/cable metadata is carried on node/edge attrs
-    G = npw.build_graph_from_legacy(grid, cables_dict)
     G = npw.compute_voltage_drop(G)
-    grid, cables_dict, dlist = npw.sync_legacy_from_graph(G, grid, cables_dict)
 
     print("\nchecking inventory:")
-    npw.choose_cables_in_inventory(project_folder, cables_dict, param["inventory"])
-    npw.choose_distros_in_inventory(project_folder, grid, param["inventory"])
+    npw.choose_cables_in_inventory(project_folder, G, param["inventory"])
+    npw.choose_distros_in_inventory(project_folder, G, param["inventory"])
 
-    npw.print_grid_info(grid, cables_dict, phase_balance, has_no_phase, dlist)
+    npw.print_grid_info(G, None, phase_balance, has_no_phase, None)
 
     if param["update"]["qgis_layers"]:
-        npw.update_1phase_layers(grid, cables_dict, qgs_project)
-        npw.update_load_layers(grid, param["loads_layers_list"], qgs_project)
+        npw.update_1phase_layers(G, qgs_project)
+        npw.update_load_layers(G, param["loads_layers_list"], qgs_project)
 
     if param["update"]["phase_balance_spreadsheet"]:
-        npw.write_spreadsheet(grid, sh)
+        npw.write_spreadsheet(G, sh)
 
-    return grid, cables_dict
+    return G
 
 
-def main() -> tuple[dict, dict, bool]:
+def main() -> tuple[object, dict, bool]:
     check_qgis_version()
     running_in_qgis = is_running_in_qgis()
     nopywer_folder = os.path.dirname(__file__)
@@ -133,14 +129,14 @@ def main() -> tuple[dict, dict, bool]:
     param = npw.get_user_parameters()
 
     qgs_project, project_folder, qgs = get_project(param, running_in_qgis)
-    grid, cables_dict = run_analysis(qgs_project, project_folder, param)
+    G = run_analysis(qgs_project, project_folder, param)
     if not running_in_qgis:
         qgs.exitQgis()
 
     print("\nNopywer analysis completed :)")
 
-    return grid, qgs_project, running_in_qgis
+    return G, qgs_project, running_in_qgis
 
 
 if (__name__ == "__main__") or (QgsApplication.instance() is not None):
-    grid, qgs_project, running_in_qgis = main()
+    G, qgs_project, running_in_qgis = main()

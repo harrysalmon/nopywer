@@ -14,6 +14,11 @@ from qgis.core import (
 from qgis.utils import iface
 from qgis.PyQt.QtCore import QMetaType
 
+try:
+    import networkx as nx
+except Exception:
+    nx = None
+
 
 def draw_point_layer(project: QgsProject):
     # based on https://anitagraser.com/pyqgis-101-introduction-to-qgis-python-programming-for-non-programmers/pyqgis101-creating-editing-a-new-vector-layer/
@@ -139,13 +144,21 @@ def draw_cable_layer(project: QgsProject, grid: Dict, optim_edges: List):
 
 def _format_edges(grid: Dict, optim_edges: List):
     optim_lines = []
+    is_graph = (nx is not None) and isinstance(grid, nx.Graph)
     for e in optim_edges:
+        if is_graph:
+            src = grid.nodes[e[0]].get("coordinates")
+            dst = grid.nodes[e[1]].get("coordinates")
+        else:
+            src = grid[e[0]]["coordinates"]
+            dst = grid[e[1]]["coordinates"]
+
         optim_lines.append(
             {
                 "from": e[0],
                 "to": e[1],
                 "length": e[2],
-                "points": [grid[e[0]]["coordinates"], grid[e[1]]["coordinates"]],
+                "points": [src, dst],
             }
         )
 
