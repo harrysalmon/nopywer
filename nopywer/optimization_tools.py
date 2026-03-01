@@ -1,11 +1,67 @@
 import numpy as np
+import os
 import pickle
 from pprint import pprint
 import pulp
-import matplotlib.pyplot as plt
-import networkx as nx
 from qgis.core import QgsDistanceArea
 from nopywer.minimum_spanning_tree2 import minimum_spanning_tree
+
+try:
+    import networkx as nx
+    _HAS_NETWORKX = True
+    _NETWORKX_ERROR = None
+except Exception as nx_exc:
+    nx = None
+    _HAS_NETWORKX = False
+    _NETWORKX_ERROR = nx_exc
+
+try:
+    import matplotlib.pyplot as plt
+    _HAS_MATPLOTLIB = True
+    _MATPLOTLIB_ERROR = None
+except Exception as mpl_exc:
+    plt = None
+    _HAS_MATPLOTLIB = False
+    _MATPLOTLIB_ERROR = mpl_exc
+
+_HAS_PLOT_STACK = _HAS_NETWORKX and _HAS_MATPLOTLIB
+if _HAS_PLOT_STACK:
+    _PLOT_STACK_ERROR = None
+else:
+    _PLOT_STACK_ERROR = _MATPLOTLIB_ERROR or _NETWORKX_ERROR
+
+
+def _get_node_value(node, key):
+    if isinstance(node, dict):
+        return node[key]
+    return getattr(node, key)
+
+
+def _extract_xy(node):
+    if isinstance(node, dict):
+        if ("x" in node) and ("y" in node):
+            return node["x"], node["y"]
+        coord = node.get("coordinates", None)
+        if coord is not None:
+            return coord.x(), coord.y()
+        return None, None
+
+    coord = getattr(node, "coordinates", None)
+    if coord is not None:
+        return coord.x(), coord.y()
+    return None, None
+
+
+def _matplotlib_can_show():
+    if not _HAS_MATPLOTLIB:
+        return False
+
+    backend = str(plt.get_backend()).lower()
+    if "inline" in backend:
+        return False
+
+    non_interactive_suffixes = ("agg", "pdf", "ps", "svg", "template", "cairo")
+    return not backend.endswith(non_interactive_suffixes)
 
 
 def phase_assignment_greedy(grid: dict):
@@ -58,18 +114,18 @@ def qgis2list(grid):
         QgsDistanceArea()
     )  # https://qgis.org/pyqgis/3.22/core/QgsDistanceArea.html
     for src_name, source in grid.items():
+        src_coord = _get_node_value(source, "coordinates")
         nodes[src_name] = {
-            "power": source["power"],
-            "cum_power": source["cum_power"],
-            "x": source[
-                "coordinates"
-            ].x(),  # https://qgis.org/pyqgis/3.38/core/QgsPointXY.html
-            "y": source["coordinates"].y(),
+            "power": _get_node_value(source, "power"),
+            "cum_power": _get_node_value(source, "cum_power"),
+            "x": src_coord.x(),  # https://qgis.org/pyqgis/3.38/core/QgsPointXY.html
+            "y": src_coord.y(),
         }
 
         for dst_name, dest in grid.items():
-            if source != dest:
-                dist = qgsDist.measureLine(source["coordinates"], dest["coordinates"])
+            if src_name != dst_name:
+                dst_coord = _get_node_value(dest, "coordinates")
+                dist = qgsDist.measureLine(src_coord, dst_coord)
                 edges.append((src_name, dst_name, dist))
                 # print(f'{source}-{dest} dist = {dist:.0f} m')
 
@@ -203,6 +259,7 @@ def find_optimal_layout(grid, edges):
 
     # print the result
     print(f"prob status: {pulp.LpStatus[prob.status]}")
+    edges_final = []
     if pulp.LpStatus[prob.status] != "Infeasible":
         print(f"\nObjective Value: {pulp.value(prob.objective)} \n")
         print("connections:")
@@ -226,33 +283,95 @@ def find_optimal_layout(grid, edges):
         # 	slack = constraints.get(name).slack
         # 	print(f'constraint {name} has value: {value:0.2e} and slack: {slack:0.2e}')
 
-        # Define the graph
-        G = nx.DiGraph()
-        edges_final = [(e[0], e[1], e[2]) for e in edges if edges_conn[e[0], e[1]]]
-        G.add_weighted_edges_from(edges_final)
+        edges_final = [
+            (e[0], e[1], e[2]) for e in edges if pulp.value(edges_conn[e[0], e[1]])
+        ]
 
-        # Plot the graph
-        pos = {name: (node["x"], node["y"]) for name, node in grid.items()}
-        colormap = ["red" if node == "generator" else "green" for node in G.nodes()]
-        nx.draw(
-            G,
-            pos,
-            with_labels=True,
-            node_color=colormap,
-            node_size=100,
-            arrows=True,
-            horizontalalignment="left",
-            font_size=8,
-        )
-        labels = {
-            (e[0], e[1]): f"{e[2]:.0f}m"
-            for e in edges
-            if pulp.value(edges_conn[e[0], e[1]])
-        }
-        nx.draw_networkx_edge_labels(G, pos, edge_labels=labels)
-        plt.show()
+        if _HAS_PLOT_STACK:
+            # Define the graph
+            G = nx.DiGraph()
+            G.add_weighted_edges_from(edges_final)
+
+            # Plot the graph
+            pos = {name: (node["x"], node["y"]) for name, node in grid.items()}
+            colormap = ["red" if node == "generator" else "green" for node in G.nodes()]
+            nx.draw(
+                G,
+                pos,
+                with_labels=True,
+                node_color=colormap,
+                node_size=100,
+                arrows=True,
+                horizontalalignment="left",
+                font_size=8,
+            )
+            labels = {
+                (e[0], e[1]): f"{e[2]:.0f}m"
+                for e in edges
+                if pulp.value(edges_conn[e[0], e[1]])
+            }
+            nx.draw_networkx_edge_labels(G, pos, edge_labels=labels)
+            if _matplotlib_can_show():
+                plt.show()
+            else:
+                print(
+                    "plot generated; skipping plt.show() on non-interactive matplotlib backend"
+                )
+        else:
+            print(f"plotting disabled: {_PLOT_STACK_ERROR}")
 
     return edges_final
+
+
+def export_layout_pyvis(grid, edges_final, output_html="outputs/optimal_layout.html"):
+    try:
+        from pyvis.network import Network
+    except Exception as exc:
+        print(f"pyvis export disabled: {exc}")
+        return None
+
+    if not edges_final:
+        print("pyvis export skipped: no edges")
+        return None
+
+    output_folder = os.path.dirname(output_html)
+    if output_folder:
+        os.makedirs(output_folder, exist_ok=True)
+
+    coords = {name: _extract_xy(node) for name, node in grid.items()}
+    all_coords_available = all(x is not None and y is not None for x, y in coords.values())
+
+    if all_coords_available:
+        xs = [x for x, _ in coords.values()]
+        ys = [y for _, y in coords.values()]
+        x_min, x_max = min(xs), max(xs)
+        y_min, y_max = min(ys), max(ys)
+        x_span = max(x_max - x_min, 1e-9)
+        y_span = max(y_max - y_min, 1e-9)
+
+    net = Network(height="900px", width="100%", directed=True, cdn_resources="remote")
+
+    for name, node in grid.items():
+        color = "#d62728" if name == "generator" else "#2ca02c"
+        node_args = {"label": name, "title": name, "color": color}
+
+        if all_coords_available:
+            x, y = coords[name]
+            node_args["x"] = int(((x - x_min) / x_span - 0.5) * 1600)
+            node_args["y"] = int((0.5 - (y - y_min) / y_span) * 1000)
+            node_args["physics"] = False
+
+        net.add_node(name, **node_args)
+
+    for src, dst, dist in edges_final:
+        net.add_edge(src, dst, label=f"{dist:.0f}m", title=f"{dist:.1f} m")
+
+    if not all_coords_available:
+        net.toggle_physics(True)
+
+    net.write_html(output_html, open_browser=False, notebook=False)
+    print(f"wrote pyvis layout: {output_html}")
+    return output_html
 
 
 def find_min_spanning_tree(grid, edges):

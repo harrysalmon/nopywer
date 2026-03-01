@@ -16,6 +16,9 @@ def get_optimal_layout():
     optim_edges = npw.find_optimal_layout(nodes, edges)
     # npw.find_min_spanning_tree(nodes, edges) # too computational intensive
 
+    if npw.export_layout_pyvis is not None:
+        npw.export_layout_pyvis(nodes, optim_edges, "outputs/optimal_layout.html")
+
     # if applicable, draw back the grid in QGIS
     if (param["grid_src"] == "compute") and running_in_qgis:
         print(f"drawing optimal cable layer in QGIS: {qgs_project.fileName()}...")

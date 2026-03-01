@@ -1,0 +1,24 @@
+project_file: ./project_file.qgs
+
+cables_layers_list:
+- norg_3phases_63a_2025
+- norg_3phases_32a_2025
+- norg_1phase_2025
+
+loads_layers_list:
+- norg_nodes_2025
+
+phase_balance_spreadsheet:
+  name: Power 2025 map balance.ods
+  sheet: All
+  skiprows: 0
+
+inventory: ./power/norg_power_inventory.ods
+
+extra_cable_length: 10
+
+grid_src: compute
+
+update:
+  qgis_layers: False
+  phase_balance_spreadsheet: False

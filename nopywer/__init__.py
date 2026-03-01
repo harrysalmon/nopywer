@@ -1,10 +1,20 @@
 # nopywer imports
-from .optimization_tools import (
-    phase_assignment_greedy,
-    find_optimal_layout,
-    qgis2list,
-    find_min_spanning_tree,
-)
+# Optional: optimization stack pulls in matplotlib, which may be unavailable
+# or blocked in some embedded QGIS Python environments.
+try:
+    from .optimization_tools import (
+        phase_assignment_greedy,
+        find_optimal_layout,
+        qgis2list,
+        find_min_spanning_tree,
+        export_layout_pyvis,
+    )
+except Exception:
+    phase_assignment_greedy = None
+    find_optimal_layout = None
+    qgis2list = None
+    find_min_spanning_tree = None
+    export_layout_pyvis = None
 from .check_inventory import choose_cables_in_inventory, choose_distros_in_inventory
 from .cumulate_current import cumulate_current
 from .draw_layer import draw_point_layer, draw_cable_layer
