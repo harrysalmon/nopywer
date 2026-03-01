@@ -1,3 +1,10 @@
+"""Entrypoint for the nopywer analysis pipeline.
+
+The runtime model is a directed NetworkX graph built from QGIS geometry. Each
+analysis stage (spreadsheet ingestion, current cumulation, voltage drop, inventory,
+reporting, optimization prep) reads/writes graph node and edge attributes.
+"""
+
 import os
 
 import numpy as np
@@ -13,6 +20,7 @@ import nopywer as npw
 
 
 def check_qgis_version():
+    """Ensure the running QGIS version is new enough for this pipeline."""
     qgis_version_min = "3.34"
     qgis_version = Qgis.QGIS_VERSION.split(".")
 
@@ -72,6 +80,7 @@ def load_qgis_project(
 def run_analysis(
     qgs_project: QgsProject, project_folder: str, param: dict
 ) -> object:
+    """Run one full electrical analysis pass and return the graph result."""
     # constant data (global variables)
     CONSTANTS = npw.get_constant_parameters()
     V0 = CONSTANTS["V0"]
@@ -79,14 +88,13 @@ def run_analysis(
     cables_layers_list = param["cables_layers_list"]
 
     # find grid geometry
-    cables_dict, grid, _dlist_legacy = npw.get_grid_geometry(qgs_project, param)
+    G = npw.get_grid_geometry(qgs_project, param)
 
     # spreadsheet: assign phases
     # --> user manually assign phases via the spreadsheet
     # TODO: use npw.phase_assignment_greedy(grid)
 
     # canonical runtime model: graph with node/edge electrical attributes
-    G = npw.build_graph_from_legacy(grid, cables_dict)
     G, has_no_phase, sh = npw.read_spreadsheet(
         project_folder, G, param["phase_balance_spreadsheet"]
     )
@@ -119,6 +127,7 @@ def run_analysis(
 
 
 def main() -> tuple[object, dict, bool]:
+    """Load project context, execute analysis, and return graph + QGIS context."""
     check_qgis_version()
     running_in_qgis = is_running_in_qgis()
     nopywer_folder = os.path.dirname(__file__)

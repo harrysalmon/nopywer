@@ -1,3 +1,16 @@
+"""Build graph geometry from QGIS layers.
+
+This module reads load and cable features from QGIS layers, infers cable-to-load
+connectivity, and constructs a directed NetworkX graph rooted at ``generator``.
+
+In the graph:
+- Nodes represent loads/junctions/generator with coordinates and electrical attrs.
+- Edges represent physical cables with GIS metadata and electrical attrs.
+
+Disconnected loads remain in the graph as isolated nodes. Cables not connected on
+both ends are reported and excluded from the directed tree topology.
+"""
+
 # This code is intented to find which load is connected to which cable
 #
 # It uses the class QgsDistanceArea and its methods:
@@ -30,14 +43,13 @@
 #
 
 # imports
-import json  # to print: print(json.dumps(cables_dict, sort_keys=True, indent=4))
 from qgis.core import QgsDistanceArea, QgsUnitTypes, QgsFeature
 from .get_layer import get_layer
 from .get_coordinates import get_coordinates
-from .get_children import get_children
 from .core_objects import Cable, Node
 import traceback
 import logging
+import numpy as np
 
 try:
     import networkx as nx
@@ -49,6 +61,7 @@ verbose = 0
 
 
 def get_load_name(load: QgsFeature) -> str:
+    """Normalize and return the load name from a QGIS feature."""
     verbose = 0
 
     load_name = load.attribute("name")
@@ -73,7 +86,7 @@ def get_load_name(load: QgsFeature) -> str:
 
 
 def get_cables_info(project, cables_layers_list, extra_cable_length) -> dict:
-    """get cables info (layers' CRS and cables attributes"""
+    """Extract cable objects from configured QGIS cable layers."""
 
     cables_dict = {}
 
@@ -134,7 +147,7 @@ def get_cables_info(project, cables_layers_list, extra_cable_length) -> dict:
 
 
 def get_loads_info(project, loads_layers_list) -> dict:
-    """get loads info"""
+    """Extract load nodes from configured QGIS load layers."""
     if verbose:
         print("get_loads_info:")
 
@@ -171,9 +184,7 @@ def get_loads_info(project, loads_layers_list) -> dict:
 
 
 def is_load_connected(cable, load, qgsDist):
-    """compute distance load-extremities of the cable and store it
-    TODO: check correctness of distance ??
-    """
+    """Return True when a load is within threshold distance of a cable end."""
     verbose = 0
 
     elist = [
@@ -193,6 +204,7 @@ def is_load_connected(cable, load, qgsDist):
 def find_connections(
     project, loads_layers_list, cables_layers_list, extra_cable_length, thres
 ) -> tuple[dict, dict]:
+    """Match load nodes to nearby cables and return node/cable lookup dictionaries."""
     verbose = 0
     qgsDist = QgsDistanceArea()
     cables_dict = get_cables_info(project, cables_layers_list, extra_cable_length)
@@ -233,6 +245,7 @@ def find_connections(
 
 
 def compute_deepness_list(grid):
+    """Legacy helper: compute node names grouped by precomputed deepness."""
     # --- sort loads by deepness
     dmax = 0
     for load in grid.keys():  # find max deepness
@@ -250,8 +263,101 @@ def compute_deepness_list(grid):
     return dlist
 
 
+def _build_graph_from_connections(
+    nodes_dict: dict, cables_dict: dict, root: str = "generator"
+):
+    """Build directed tree-like graph from connection dictionaries.
+
+    The underlying undirected connectivity graph is validated for cycles in the
+    connected component containing ``root``. Directed edges are then oriented by
+    BFS traversal from the root.
+    """
+    if nx is None:
+        raise ImportError("networkx is required to build graph geometry")
+
+    G = nx.DiGraph()
+    U = nx.Graph()
+
+    for name, node in nodes_dict.items():
+        coord = node.coordinates
+        x = float(coord.x()) if coord is not None else None
+        y = float(coord.y()) if coord is not None else None
+        G.add_node(
+            name,
+            node_type="generator" if name == root else "load",
+            coordinates=coord,
+            x=x,
+            y=y,
+            power=np.array(node.power, dtype=float),
+            cum_power=np.array(node.cum_power, dtype=float),
+            phase=node.phase,
+            voltage=0.0,
+            vdrop_percent=0.0,
+            distro={"in": None, "out": {}},
+            distro_chosen={"in": None, "out": None},
+        )
+        U.add_node(name)
+
+    for cable_layer_name, cable_layer in cables_dict.items():
+        for cable_idx, cable in enumerate(cable_layer):
+            cable_nodes = list(dict.fromkeys(cable.nodes))
+            if len(cable_nodes) < 2:
+                continue
+            if len(cable_nodes) > 2:
+                raise ValueError(
+                    f"cable {cable_layer_name}:{cable_idx} is connected to more than two nodes: {cable_nodes}"
+                )
+
+            src, dst = cable_nodes
+            if U.has_edge(src, dst):
+                raise ValueError(
+                    f"multiple cables between nodes '{src}' and '{dst}' are not supported in DiGraph mode"
+                )
+
+            U.add_edge(
+                src,
+                dst,
+                layer_name=cable_layer_name,
+                feature_id=cable_idx,
+                cable_ref={"layer": cable_layer_name, "idx": cable_idx},
+                length=float(cable.length),
+                area=float(cable.area),
+                resistance=float(cable.r),
+                plugs_and_sockets=cable.plugs_and_sockets,
+                phase=cable.phase,
+                current=list(cable.current),
+                vdrop_volts=float(getattr(cable, "vdrop_volts", 0.0)),
+                waypoints=[
+                    (float(p.x()), float(p.y()))
+                    for p in (cable.coordinates or [])
+                    if p is not None
+                ],
+            )
+
+    if root not in G:
+        raise ValueError(f"root node '{root}' is missing from loads layers")
+
+    if root in U:
+        connected = nx.node_connected_component(U, root)
+        connected_graph = U.subgraph(connected).copy()
+        if connected_graph.number_of_edges() > 0 and (not nx.is_tree(connected_graph)):
+            raise ValueError(
+                "There is an infinite loop on the map. Make sure to display all cable layers and fix."
+            )
+
+        for parent, child in nx.bfs_edges(U, root):
+            attrs = dict(U.get_edge_data(parent, child))
+            G.add_edge(parent, child, **attrs)
+
+    return G
+
+
 def compute_distro_requirements(grid, cables_dict):
-    """must be run after 'inspect_cable_layer'"""
+    """Compute incoming/outgoing distro requirements for each node.
+
+    Graph mode is the primary path. The legacy dict path is kept as fallback.
+    This should be run after cable layers were inspected so plug ratings are set.
+    """
     if (nx is not None) and isinstance(grid, nx.Graph):
         G = grid
         verbose = 0
@@ -373,6 +479,7 @@ def compute_distro_requirements(grid, cables_dict):
 
 
 def get_grid_geometry(project, param: dict):
+    """Read QGIS layers and return the canonical directed grid graph."""
     verbose = 0
     if verbose:
         print("get grid geometry: \nfind_connections")
@@ -389,30 +496,6 @@ def get_grid_geometry(project, param: dict):
         thres,
     )
 
-    # 2. find connections between nodes to get the "flow direction":
-    # Now, all cables that are connected to something are (supposed to be) stored in cables_dict.
-    # Let's loop over the nodes again, but this time, we will find to what node is connected each node
-    # We'll start with "generator" node, get its children, then check its children's children, etc
-    if verbose:
-        print("\nget_children")
-
-    grid = get_children("generator", nodes_dict, cables_dict)
-    grid = grid[0]
-
-    # --- for each load, add "cable to daddy" information
-    for load in grid.keys():
-        if load != "generator":
-            parent = grid[load].parent
-            if parent != None:
-                cable2parent = grid[parent].children[load]["cable"]
-                grid[load].cable = cable2parent
-
-    dlist = compute_deepness_list(grid)
-
-    if 0:
-        print("\n")
-        print(json.dumps(cables_dict, sort_keys=True, indent=4))
-        print(json.dumps(nodes_dict, sort_keys=True, indent=4))
-        print(json.dumps(grid, sort_keys=True, indent=4))
-
-    return cables_dict, grid, dlist
+    # 2. build directed topology graph rooted at generator.
+    G = _build_graph_from_connections(nodes_dict, cables_dict, root="generator")
+    return G
