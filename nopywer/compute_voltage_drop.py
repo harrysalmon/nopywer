@@ -1,6 +1,11 @@
 import numpy as np
 from .get_constant_parameters import get_constant_parameters
 
+try:
+    import networkx as nx
+except Exception:
+    nx = None
+
 # --- constant data
 th_percent = 5  # vdrop threshold in %, above with a message is printed
 CONSTANTS = get_constant_parameters()
@@ -14,7 +19,41 @@ vdrop_coef = 1  # np.sqrt(3) # todo: change coef for 1-phase vs 3-phase https://
 verbose = 0
 
 
-def compute_voltage_drop(grid: dict, cables_dict: dict, load=None):
+def _is_graph(obj) -> bool:
+    return (nx is not None) and isinstance(obj, nx.Graph)
+
+
+def compute_voltage_drop_graph(G, root: str = "generator"):
+    if root not in G:
+        return G
+
+    for node in G.nodes():
+        G.nodes[node]["voltage"] = float(0.0)
+        G.nodes[node]["vdrop_percent"] = float(0.0)
+
+    G.nodes[root]["voltage"] = float(V0)
+    G.nodes[root]["vdrop_percent"] = 0.0
+
+    for parent, load in nx.bfs_edges(G, root):
+        edge = G.edges[parent, load]
+        resistance = float(edge.get("resistance", 0.0))
+        current = edge.get("current", []) or []
+        max_current = float(np.max(current)) if len(current) > 0 else 0.0
+        edge["vdrop_volts"] = float(vdrop_coef * resistance * max_current)
+
+        G.nodes[load]["voltage"] = float(G.nodes[parent]["voltage"] - edge["vdrop_volts"])
+        G.nodes[load]["vdrop_percent"] = float(100 * (V0 - G.nodes[load]["voltage"]) / vdrop_ref)
+
+        if G.nodes[load]["vdrop_percent"] > th_percent:
+            print(f"\t /!\\ vdrop of {G.nodes[load]['vdrop_percent']:.1f} percent at {load}")
+
+    return G
+
+
+def compute_voltage_drop(grid: dict, cables_dict: dict = None, load=None):
+    if _is_graph(grid):
+        return compute_voltage_drop_graph(grid)
+
     # load is supposed to be a string
     verbose = 0
     if verbose:

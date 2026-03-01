@@ -90,18 +90,23 @@ def run_analysis(
         project_folder, grid, cables_dict, param["phase_balance_spreadsheet"]
     )
 
-    # compute cumulated current
-    grid, cables_dict = npw.cumulate_current(grid, cables_dict, dlist, V0, PF)
+    # migrate electrical calculations to graph-first representation
+    G = npw.build_graph_from_legacy(grid, cables_dict)
+    G = npw.cumulate_current(G, V0=V0, PF=PF)
+    grid, cables_dict, dlist = npw.sync_legacy_from_graph(G, grid, cables_dict)
 
     phase_balance = 100 * np.std(
-        grid["generator"].cum_power / np.mean(grid["generator"].cum_power)
+        G.nodes["generator"]["cum_power"] / np.mean(G.nodes["generator"]["cum_power"])
     )
 
     cables_dict = npw.inspect_cable_layers(qgs_project, cables_layers_list, cables_dict)
     grid = npw.compute_distro_requirements(grid, cables_dict)
 
     print("\ncomputingVDrop...")
-    grid, cables_dict = npw.compute_voltage_drop(grid, cables_dict)
+    # rebuild graph so updated distro/cable metadata is carried on node/edge attrs
+    G = npw.build_graph_from_legacy(grid, cables_dict)
+    G = npw.compute_voltage_drop(G)
+    grid, cables_dict, dlist = npw.sync_legacy_from_graph(G, grid, cables_dict)
 
     print("\nchecking inventory:")
     npw.choose_cables_in_inventory(project_folder, cables_dict, param["inventory"])

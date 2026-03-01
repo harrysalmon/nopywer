@@ -9,6 +9,7 @@ import math
 import unittest
 
 import numpy as np
+import networkx as nx
 
 try:
     from tests.module_loader import import_nopywer_module, install_fake_qgis
@@ -47,6 +48,52 @@ class DummyNode:
 
 
 class MigrationConfidenceTests(unittest.TestCase):
+    def test_cumulate_current_graph_contract(self):
+        G = nx.DiGraph()
+        G.add_node("generator", power=np.array([0.0, 0.0, 0.0]), cum_power=np.array([0.0, 0.0, 0.0]))
+        G.add_node("a", power=np.array([900.0, 0.0, 0.0]), cum_power=np.array([0.0, 0.0, 0.0]))
+        G.add_node("b", power=np.array([0.0, 450.0, 0.0]), cum_power=np.array([0.0, 0.0, 0.0]))
+        G.add_edge("generator", "a", current=[])
+        G.add_edge("a", "b", current=[])
+
+        G = cumulate_current_mod.cumulate_current(G, V0=230.0, PF=0.9)
+
+        np.testing.assert_allclose(G.nodes["b"]["cum_power"], [0.0, 450.0, 0.0], rtol=0, atol=1e-9)
+        np.testing.assert_allclose(G.nodes["a"]["cum_power"], [900.0, 450.0, 0.0], rtol=0, atol=1e-9)
+        np.testing.assert_allclose(
+            G.nodes["generator"]["cum_power"], [900.0, 450.0, 0.0], rtol=0, atol=1e-9
+        )
+        np.testing.assert_allclose(
+            G.edges["a", "b"]["current"], np.array([0.0, 450.0, 0.0]) / 230.0 / 0.9, rtol=0, atol=1e-9
+        )
+        np.testing.assert_allclose(
+            G.edges["generator", "a"]["current"],
+            np.array([900.0, 450.0, 0.0]) / 230.0 / 0.9,
+            rtol=0,
+            atol=1e-9,
+        )
+
+    def test_compute_voltage_drop_graph_contract(self):
+        G = nx.DiGraph()
+        G.add_node("generator", voltage=0.0, vdrop_percent=0.0)
+        G.add_node("a", voltage=0.0, vdrop_percent=0.0)
+        G.add_node("b", voltage=0.0, vdrop_percent=0.0)
+        G.add_edge("generator", "a", resistance=0.5, current=[2.0, 1.0, 0.0], vdrop_volts=0.0)
+        G.add_edge("a", "b", resistance=1.0, current=[3.0, 0.0, 0.0], vdrop_volts=0.0)
+
+        G = compute_voltage_drop_mod.compute_voltage_drop(G)
+
+        vdrop_ref = math.sqrt(3) * 230.0
+        expected_v_a = 230.0 - 0.5 * 2.0
+        expected_v_b = expected_v_a - 1.0 * 3.0
+
+        self.assertAlmostEqual(G.edges["generator", "a"]["vdrop_volts"], 1.0, places=9)
+        self.assertAlmostEqual(G.edges["a", "b"]["vdrop_volts"], 3.0, places=9)
+        self.assertAlmostEqual(G.nodes["a"]["voltage"], expected_v_a, places=9)
+        self.assertAlmostEqual(G.nodes["b"]["voltage"], expected_v_b, places=9)
+        self.assertAlmostEqual(G.nodes["a"]["vdrop_percent"], 100.0 * (230.0 - expected_v_a) / vdrop_ref)
+        self.assertAlmostEqual(G.nodes["b"]["vdrop_percent"], 100.0 * (230.0 - expected_v_b) / vdrop_ref)
+
     def test_get_children_builds_tree_and_deepness(self):
         cables = {
             "L": [
