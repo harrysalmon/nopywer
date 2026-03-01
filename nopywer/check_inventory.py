@@ -1,13 +1,19 @@
-from itertools import combinations
-import numpy as np
+"""Inventory matching for graph-based cables and distros."""
+
 import os
-import pandas as pd
 import re
+from itertools import combinations
+
+import numpy as np
+import pandas as pd
 
 try:
     import networkx as nx
-except Exception:
+except Exception as exc:  # pragma: no cover - dependency import guard
     nx = None
+    _NETWORKX_ERROR = exc
+else:
+    _NETWORKX_ERROR = None
 
 
 def find_combinations(arr: list, target_sum, th: float = 5.0):
@@ -90,93 +96,20 @@ def compute_cable_length_in_inventory():
     print(f"\t total 1p length: {len_1p:.0f}m")
 
 
-def choose_cables_in_inventory(
-    project_path: str, cables_dict: object, sh_name: str
-) -> object:
-    if (nx is not None) and isinstance(cables_dict, nx.Graph):
-        G = cables_dict
-        verbose = 1
-        unmatched = []
-        print("\nReading cables inventory")
-        df = pd.read_excel(
-            os.path.join(project_path, sh_name),
-            sheet_name="cables",
-            skiprows=0,
-            engine="odf",
+def choose_cables_in_inventory(project_path: str, G, sh_name: str):
+    """Match each cable edge to inventory stock and store selected combos.
+
+    Args:
+        project_path: Folder containing the inventory spreadsheet.
+        G: Directed runtime graph with cable metadata on edges.
+        sh_name: Inventory spreadsheet filename.
+    """
+    if nx is None:
+        raise ImportError(
+            f"networkx is required for choose_cables_in_inventory: {_NETWORKX_ERROR}"
         )
-
-        edges_by_layer = {}
-        for src, dst, edge in G.edges(data=True):
-            layer_name = edge.get("layer_name", None)
-            if layer_name is None:
-                continue
-            edges_by_layer.setdefault(layer_name, [])
-            edges_by_layer[layer_name].append((src, dst, edge))
-
-        for cable_layer_name in edges_by_layer.keys():
-            if verbose:
-                print(f"\n\t\t layer: {cable_layer_name}")
-
-            cable_layer = sorted(
-                edges_by_layer[cable_layer_name],
-                key=lambda e: float(e[2].get("length", 0.0)),
-                reverse=True,
-            )
-
-            for idx, (src, dst, cable) in enumerate(cable_layer):
-                if verbose >= 2:
-                    print(
-                        f"\n\t\t\t taking care of cable {idx + 1}/{len(cable_layer)}, length {cable['length']} m"
-                    )
-
-                if "3phases" in cable_layer_name:
-                    n_phases = 3
-                elif "1phase" in cable_layer_name:
-                    n_phases = 1
-                else:
-                    raise Exception(
-                        f"unable to find out nuymber of phases of layer {cable_layer_name}"
-                    )
-
-                compatible_rows = (
-                    (df["number of phases"] == n_phases)
-                    & (df["plugs&sockets [A]"] == cable.get("plugs_and_sockets"))
-                    & (df["section [mm2]"] == cable.get("area"))
-                )
-                compatible_df = df[compatible_rows]
-
-                comb = None
-                if not compatible_df.empty:
-                    list_of_cables = [
-                        length
-                        for qty, length in zip(
-                            compatible_df["quantity"], compatible_df["length [m]"]
-                        )
-                        for i in range(qty)
-                    ]
-                    target_sum = float(cable.get("length", 0.0))
-                    comb = find_combinations(list_of_cables, target_sum)
-                    if (comb is None) | verbose:
-                        print(f"\t\t\t cable {[src, dst]}: {comb}")
-
-                    if comb is not None:
-                        for c in comb:
-                            df.loc[
-                                compatible_rows & (df["length [m]"] == c), "quantity"
-                            ] -= 1
-                        cable["inventory_combo"] = list(comb)
-
-                if comb is None:
-                    unmatched.append((src, dst, cable))
-                    cable["inventory_combo"] = None
-
-        print("\t unmatched cables: ")
-        for src, dst, unm in unmatched:
-            print(
-                f"\t {unm.get('plugs_and_sockets')}{'A':.<4} ({float(unm.get('length', 0.0)):.0f}m) {src}-{dst} "
-            )
-
-        return G
+    if not isinstance(G, nx.Graph):
+        raise TypeError("choose_cables_in_inventory expects a NetworkX graph")
 
     verbose = 1
     unmatched = []
@@ -188,93 +121,76 @@ def choose_cables_in_inventory(
         engine="odf",
     )
 
-    if verbose >= 3:
-        print(f"\t {df}")
+    edges_by_layer = {}
+    for src, dst, edge in G.edges(data=True):
+        layer_name = edge.get("layer_name", None)
+        if layer_name is None:
+            continue
+        edges_by_layer.setdefault(layer_name, [])
+        edges_by_layer[layer_name].append((src, dst, edge))
 
-    for cable_layer_name in cables_dict.keys():
+    for cable_layer_name in edges_by_layer.keys():
         if verbose:
             print(f"\n\t\t layer: {cable_layer_name}")
 
-        # sort cables. Decreasing order allows to make sure long cables are used for long dsitances, decreasing number of extensions
         cable_layer = sorted(
-            cables_dict[cable_layer_name], key=lambda d: d.length, reverse=True
-        )  # https://stackoverflow.com/questions/72899/how-to-sort-a-list-of-dictionaries-by-a-value-of-the-dictionary-in-python
+            edges_by_layer[cable_layer_name],
+            key=lambda e: float(e[2].get("length", 0.0)),
+            reverse=True,
+        )
 
-        for idx, cable in enumerate(cable_layer):
+        for idx, (src, dst, cable) in enumerate(cable_layer):
             if verbose >= 2:
                 print(
                     f"\n\t\t\t taking care of cable {idx + 1}/{len(cable_layer)}, length {cable['length']} m"
                 )
 
-            # get compatible cables
             if "3phases" in cable_layer_name:
                 n_phases = 3
-
             elif "1phase" in cable_layer_name:
                 n_phases = 1
-
             else:
                 raise Exception(
                     f"unable to find out nuymber of phases of layer {cable_layer_name}"
                 )
 
-            if verbose >= 2:
-                print(f" n phases: {n_phases}")
-
             compatible_rows = (
                 (df["number of phases"] == n_phases)
-                & (df["plugs&sockets [A]"] == cable.plugs_and_sockets)
-                & (df["section [mm2]"] == cable.area)
+                & (df["plugs&sockets [A]"] == cable.get("plugs_and_sockets"))
+                & (df["section [mm2]"] == cable.get("area"))
             )
-
             compatible_df = df[compatible_rows]
-            if verbose >= 2:
-                print(f"\t\t\t compatible cables dataframe: \n {compatible_df}")
 
             comb = None
-            if compatible_df.empty:
-                if verbose >= 2:
-                    print("DataFrame is empty --> no compatible cables in inventory!")
-
-            else:
-                # build a list of all compatible cables (account for their quantity) https://stackoverflow.com/questions/16476924/how-can-i-iterate-over-rows-in-a-pandas-dataframe
+            if not compatible_df.empty:
                 list_of_cables = [
                     length
                     for qty, length in zip(
                         compatible_df["quantity"], compatible_df["length [m]"]
                     )
-                    for i in range(qty)
+                    for _ in range(qty)
                 ]
-
-                # find best combination
-                # note that slack was added from "extra_cable_length" parameters when computing cables_dict
-                target_sum = cable.length
+                target_sum = float(cable.get("length", 0.0))
                 comb = find_combinations(list_of_cables, target_sum)
-                if (comb == None) | verbose:
-                    print(f"\t\t\t cable {cable.nodes}: {comb}")
+                if (comb is None) or verbose:
+                    print(f"\t\t\t cable {[src, dst]}: {comb}")
 
-                # update inventory's panda dataframe (and list?)
-                if comb != None:
-                    found = True
+                if comb is not None:
                     for c in comb:
-                        df.loc[
-                            compatible_rows & (df["length [m]"] == c), "quantity"
-                        ] -= 1
-                        if verbose >= 2:
-                            print(
-                                f"\t\t\t qty of {c}m remaining: {df.loc[compatible_rows & (df['length [m]'] == c), 'quantity'].values}"
-                            )
+                        df.loc[compatible_rows & (df["length [m]"] == c), "quantity"] -= 1
+                    cable["inventory_combo"] = list(comb)
 
-            if comb == None:
-                unmatched.append(cable)
+            if comb is None:
+                unmatched.append((src, dst, cable))
+                cable["inventory_combo"] = None
 
     print("\t unmatched cables: ")
-    for unm in unmatched:
+    for src, dst, unm in unmatched:
         print(
-            f"\t {unm.plugs_and_sockets}{'A':.<4} ({unm.length:.0f}m) {'-'.join(unm.nodes)} "
+            f"\t {unm.get('plugs_and_sockets')}{'A':.<4} ({float(unm.get('length', 0.0)):.0f}m) {src}-{dst} "
         )
 
-    return cables_dict
+    return G
 
 
 def parse_distro_req(req: str) -> tuple[str, float]:
@@ -345,16 +261,24 @@ def distro_serie_to_dict(serie: pd.core.series.Series) -> dict:
     return distro_dict
 
 
-def choose_distros_in_inventory(project_path: str, grid: object, sh_name: str) -> object:
-    """assumes that the inventory spreadsheet has colmuns like;
+def choose_distros_in_inventory(project_path: str, G, sh_name: str):
+    """Assign distros from inventory to each graph node requirements.
+
+    Assumes that the inventory spreadsheet has columns like:
     input - type                | input - current [A]           | ...
     3P output - current [A]     | 3P output - quantity          | ...
     3P 2nd output - current [A] | 3P 2nd output - quantity      | ...
     ... <contiuning for has many types of ouput necessay> ...   | ...
     1P output - current [A]     | 1P output - quantity          | ...
     how many distros                                            |
-
     """
+    if nx is None:
+        raise ImportError(
+            f"networkx is required for choose_distros_in_inventory: {_NETWORKX_ERROR}"
+        )
+    if not isinstance(G, nx.Graph):
+        raise TypeError("choose_distros_in_inventory expects a NetworkX graph")
+
     verbose = 0
     expected_cols = [
         "input - type",
@@ -391,82 +315,12 @@ def choose_distros_in_inventory(project_path: str, grid: object, sh_name: str) -
         [col.split("-")[0][:-1] for col in df.head() if "output" in col]
     )
 
-    if (nx is not None) and isinstance(grid, nx.Graph):
-        G = grid
-        for load_name, load in G.nodes(data=True):
-            distro = load.get("distro", {"in": None, "out": {}})
-            if verbose:
-                print(f"\n\t{load_name} needs a distro with {distro}")
-
-            if (distro["in"] is not None) and (distro["out"] != {}):
-                score_cols = (
-                    ["in: " + distro["in"]]
-                    + ["out: " + req for req in distro["out"].keys()]
-                    + ["has it all"]
-                )
-                scoreboard = pd.DataFrame(None, index=df.index, columns=score_cols)
-
-                ph_in, c_in = parse_distro_req(distro["in"])
-                has_input = (df["input - type"].str.find(ph_in) != -1) & (
-                    df["input - current [A]"] == c_in
-                )
-                scoreboard.loc[:, score_cols[0]] = has_input
-                scoreboard.loc[:, score_cols[-1]] = has_input
-
-                has_output = dict.fromkeys(distro["out"].keys(), False)
-                no = 0
-                for desc, qty in distro["out"].items():
-                    no += 1
-                    ph_out, c_out = parse_distro_req(desc)
-                    inventory_col_to_check = [
-                        col for col in output_cols_head if ph_out in col
-                    ]
-                    for available_ouput in inventory_col_to_check:
-                        has_output_rating = df[f"{available_ouput} - current [A]"] == c_out
-                        has_output_qty = df.loc[:, f"{available_ouput} - quantity"] >= qty
-                        has_output[desc] = has_output[desc] | (
-                            has_output_rating & has_output_qty
-                        )
-                        scoreboard.loc[:, score_cols[no]] = has_output[desc]
-
-                    scoreboard.loc[:, score_cols[-1]] &= scoreboard.loc[:, score_cols[no]]
-
-                scoreboard.loc[:, score_cols[-1]] &= df.loc[:, "how many distros"] >= 1
-                candidates = df[scoreboard.loc[:, score_cols[-1]] == True]
-
-                if len(candidates) == 0:
-                    choice = None
-                    unmatched.append(load_name)
-                elif len(candidates) == 1:
-                    choice = df[scoreboard.loc[:, score_cols[-1]] == True].index[0]
-                else:
-                    choice = df[scoreboard.loc[:, score_cols[-1]] == True].index[0]
-
-                if choice is not None:
-                    df.loc[choice, "how many distros"] -= 1
-                    G.nodes[load_name]["distro_chosen"] = distro_serie_to_dict(df.loc[choice, :])
-                else:
-                    G.nodes[load_name]["distro_chosen"] = "no distro available"
-            else:
-                print(
-                    f"\t -> Unable to get distro requirements for {load_name}: {distro} -> skipping"
-                )
-                unmatched.append(load_name)
-                G.nodes[load_name]["distro_chosen"] = "no distro available"
-
-        if len(unmatched) == 0:
-            print("\nall nodes have a distro assigned from the inventory !")
-        else:
-            print(f"\ncould not find distros for the following loads: {unmatched}")
-
-        return G
-
-    for load_name, load in grid.items():
-        distro = load.distro  # replace by distro_requirements
+    for load_name, load in G.nodes(data=True):
+        distro = load.get("distro", {"in": None, "out": {}})
         if verbose:
             print(f"\n\t{load_name} needs a distro with {distro}")
 
-        if (distro["in"] != None) and (distro["out"] != {}):
+        if (distro["in"] is not None) and (distro["out"] != {}):
             score_cols = (
                 ["in: " + distro["in"]]
                 + ["out: " + req for req in distro["out"].keys()]
@@ -480,13 +334,10 @@ def choose_distros_in_inventory(project_path: str, grid: object, sh_name: str) -
                 df["input - current [A]"] == c_in
             )
             scoreboard.loc[:, score_cols[0]] = has_input
-            scoreboard.loc[:, score_cols[-1]] = has_input  # init total score
+            scoreboard.loc[:, score_cols[-1]] = has_input
 
-            # check output(s)
-            has_output = dict.fromkeys(
-                distro["out"].keys(), False
-            )  # a dict checking if considered distro has the correct outputs
-            no = 0  # output type counter
+            has_output = dict.fromkeys(distro["out"].keys(), False)
+            no = 0
             for desc, qty in distro["out"].items():
                 if verbose >= 2:
                     print(
@@ -496,7 +347,6 @@ def choose_distros_in_inventory(project_path: str, grid: object, sh_name: str) -
                 no += 1
                 ph_out, c_out = parse_distro_req(desc)
 
-                # loop on the type of outputs the distros have in the inventory that could match(3P or 1P?)
                 inventory_col_to_check = [
                     col for col in output_cols_head if ph_out in col
                 ]
@@ -511,17 +361,14 @@ def choose_distros_in_inventory(project_path: str, grid: object, sh_name: str) -
                         has_output_rating & has_output_qty
                     )
 
-                    # update score for this output
                     scoreboard.loc[:, score_cols[no]] = has_output[desc]
 
                     if verbose >= 3:
                         print(f"has output: \n{has_output}")
                         print(f"scoreboard: {scoreboard}")
 
-                # now that the output possibilities have been checked, update total score
                 scoreboard.loc[:, score_cols[-1]] &= scoreboard.loc[:, score_cols[no]]
 
-            # now that distro requirements have been checked, check that there is enough left in stock
             scoreboard.loc[:, score_cols[-1]] &= df.loc[:, "how many distros"] >= 1
             candidates = df[scoreboard.loc[:, score_cols[-1]] == True]
 
@@ -536,17 +383,13 @@ def choose_distros_in_inventory(project_path: str, grid: object, sh_name: str) -
 
             else:
                 prt = f"\t -> could find {len(candidates)} types of distros"
-                # take first ok one https://stackoverflow.com/a/40660434
                 choice = df[scoreboard.loc[:, score_cols[-1]] == True].index[0]
 
-            if choice != None:  # update inventory
+            if choice is not None:
                 df.loc[choice, "how many distros"] -= 1
-                # TODO: write destination in spreadsheet ?
-                # update grid with chosen distro
-                grid[load_name].distro_chosen = distro_serie_to_dict(df.loc[choice, :])
-
+                G.nodes[load_name]["distro_chosen"] = distro_serie_to_dict(df.loc[choice, :])
             else:
-                grid[load_name].distro_chosen = "no distro available"
+                G.nodes[load_name]["distro_chosen"] = "no distro available"
 
             if verbose:
                 print(prt)
@@ -559,15 +402,14 @@ def choose_distros_in_inventory(project_path: str, grid: object, sh_name: str) -
 
         else:
             print(
-                f"\t -> Unable to get distro requirements for {load_name}: {load.distro} -> skipping"
+                f"\t -> Unable to get distro requirements for {load_name}: {distro} -> skipping"
             )
-            choice = None
             unmatched.append(load_name)
+            G.nodes[load_name]["distro_chosen"] = "no distro available"
 
     if len(unmatched) == 0:
         print("\nall nodes have a distro assigned from the inventory !")
-
     else:
         print(f"\ncould not find distros for the following loads: {unmatched}")
 
-    return grid
+    return G
