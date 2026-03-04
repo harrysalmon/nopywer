@@ -198,8 +198,11 @@ def parse_distro_req(req: str) -> tuple[str, float]:
     'req' should look like: '3P 125A', '1P 16.0', ...
     """
     phase_type = req[:2]
-    assert (phase_type == "3P") or (phase_type == "1P")
+    if (phase_type != "3P") and (phase_type != "1P"):
+        raise ValueError(f"invalid distro phase prefix in '{req}'")
     result = re.search("P(.*)A", req)
+    if result is None:
+        raise ValueError(f"unable to parse current rating from '{req}'")
     current_rating = float(result.group(1))
     return phase_type, current_rating
 
@@ -233,7 +236,8 @@ def distro_serie_to_dict(serie: pd.core.series.Series) -> dict:
     for header in serie.index:
         if "output" in header:
             delimiter = header.find("-")
-            assert delimiter != -1, "unable to parse distro output"
+            if delimiter == -1:
+                raise ValueError("unable to parse distro output")
             output_desc = header[: delimiter - 1]
             if output_desc not in outputs:
                 outputs.append(output_desc)
@@ -303,9 +307,10 @@ def choose_distros_in_inventory(project_path: str, G, sh_name: str):
     if verbose >= 2:
         print(f"\t {df}")
 
-    assert list(df.columns) == expected_cols, (
-        f"The 'distos' tab of the inventory spreadsheet should have the following columns: {expected_cols}"
-    )
+    if list(df.columns) != expected_cols:
+        raise ValueError(
+            f"The 'distos' tab of the inventory spreadsheet should have the following columns: {expected_cols}"
+        )
 
     # init list of unmatched distros
     unmatched = []

@@ -35,12 +35,6 @@ def _is_graph(obj) -> bool:
     return (nx is not None) and isinstance(obj, nx.Graph)
 
 
-def _get_node_value(node, key):
-    if isinstance(node, dict):
-        return node[key]
-    return getattr(node, key)
-
-
 def _extract_xy(node):
     if isinstance(node, dict):
         if ("x" in node) and ("y" in node):
@@ -109,59 +103,50 @@ def qgis2list(grid):
 
     Saving the nodes and edges as pickles allows to run the optimization stuff
     without having to rerun everything.
+
+    Legacy note:
+    - this function previously accepted multiple input representations
+      (dict/Node/graph). It is now graph-only to avoid implicit conversions.
     """
+
+    if not _is_graph(grid):
+        raise TypeError("qgis2list expects a NetworkX graph as input")
 
     # define all possible edges
     edges = []  # list of ('source', 'dest', distance)
     nodes = {}
     qgsDist = QgsDistanceArea()
-
-    if _is_graph(grid):
-        node_items = list(grid.nodes(data=True))
-    else:
-        node_items = list(grid.items())
+    node_items = list(grid.nodes(data=True))
 
     for src_name, source in node_items:
-        if _is_graph(grid):
-            src_coord = source.get("coordinates", None)
-            src_x, src_y = source.get("x", None), source.get("y", None)
-            nodes[src_name] = {
-                "power": source.get("power"),
-                "cum_power": source.get("cum_power"),
-                "x": src_x,
-                "y": src_y,
-            }
-        else:
-            src_coord = _get_node_value(source, "coordinates")
-            nodes[src_name] = {
-                "power": _get_node_value(source, "power"),
-                "cum_power": _get_node_value(source, "cum_power"),
-                "x": src_coord.x(),
-                "y": src_coord.y(),
-            }
+        src_coord = source.get("coordinates", None)
+        src_x, src_y = source.get("x", None), source.get("y", None)
+        nodes[src_name] = {
+            "power": source.get("power"),
+            "cum_power": source.get("cum_power"),
+            "x": src_x,
+            "y": src_y,
+        }
 
         for dst_name, dest in node_items:
             if src_name == dst_name:
                 continue
 
-            if _is_graph(grid):
-                dst_coord = dest.get("coordinates", None)
-                if (src_coord is not None) and (dst_coord is not None):
-                    dist = qgsDist.measureLine(src_coord, dst_coord)
-                else:
-                    src_x = nodes[src_name]["x"]
-                    src_y = nodes[src_name]["y"]
-                    dst_x = dest.get("x")
-                    dst_y = dest.get("y")
-                    if None in (src_x, src_y, dst_x, dst_y):
-                        dist = 0.0
-                    else:
-                        dx = float(src_x - dst_x)
-                        dy = float(src_y - dst_y)
-                        dist = (dx * dx + dy * dy) ** 0.5
-            else:
-                dst_coord = _get_node_value(dest, "coordinates")
+            dst_coord = dest.get("coordinates", None)
+            if (src_coord is not None) and (dst_coord is not None):
                 dist = qgsDist.measureLine(src_coord, dst_coord)
+            else:
+                src_x = nodes[src_name]["x"]
+                src_y = nodes[src_name]["y"]
+                dst_x = dest.get("x")
+                dst_y = dest.get("y")
+                if None in (src_x, src_y, dst_x, dst_y):
+                    raise ValueError(
+                        f"missing coordinates for edge distance computation between '{src_name}' and '{dst_name}'"
+                    )
+                dx = float(src_x - dst_x)
+                dy = float(src_y - dst_y)
+                dist = (dx * dx + dy * dy) ** 0.5
 
             edges.append((src_name, dst_name, dist))
 

@@ -5,6 +5,7 @@ attributes directly onto graph nodes and incoming edges.
 """
 
 import os
+from numbers import Integral
 
 import numpy as np
 import pandas as pd
@@ -33,27 +34,47 @@ def _load_sheet(project_path: str, sparam: dict) -> pd.DataFrame:
     )
 
     for key in headers.values():
-        assert key in sh.keys(), (
-            f'key "{key}" is not on the spreadsheet. The following keys were found: {sh.keys()}'
-        )
+        if key not in sh.keys():
+            raise ValueError(
+                f'key "{key}" is not on the spreadsheet. The following keys were found: {list(sh.keys())}'
+            )
 
     return sh
 
 
 def _parse_phase(phase, has_no_phase: list, name_on_sheet: str):
     """Parse spreadsheet phase values into canonical runtime forms."""
-    if isinstance(phase, int):
-        phase_parsed = phase
+    if isinstance(phase, Integral):
+        phase_parsed = int(phase)
+        if phase_parsed not in (1, 2, 3):
+            raise ValueError(
+                f"{name_on_sheet} has invalid integer phase '{phase_parsed}'. Expected one of 1, 2, 3."
+            )
     elif isinstance(phase, str):
+        phase = phase.strip()
+        if phase == "":
+            has_no_phase.append(name_on_sheet)
+            return None
         if len(phase) == 1:
             phase_parsed = phase
             if phase == "X":
                 has_no_phase.append(name_on_sheet)
+            elif phase not in ("1", "2", "3", "T", "U", "Y"):
+                raise ValueError(f"{name_on_sheet} has a wrong phase assigned: {phase}")
         else:
-            phase_parsed = list(map(int, phase.split(",")))
-    elif phase == float("nan"):
+            try:
+                phase_parsed = [int(v.strip()) for v in phase.split(",")]
+            except Exception as exc:
+                raise ValueError(
+                    f"{name_on_sheet} has invalid multi-phase value '{phase}'"
+                ) from exc
+            if any(v not in (1, 2, 3) for v in phase_parsed):
+                raise ValueError(
+                    f"{name_on_sheet} has invalid multi-phase values '{phase_parsed}'"
+                )
+    elif pd.isna(phase):
         has_no_phase.append(name_on_sheet)
-        phase_parsed = phase
+        phase_parsed = None
     else:
         raise ValueError(f"{name_on_sheet} has a wrong phase assigned: {phase}")
 
@@ -112,7 +133,8 @@ def read_spreadsheet(project_path: str, G, sparam: dict):
             idx.append(row)
             phase = sh[headers["phase"]][row]
             pwr = np.double(sh[headers["power"]][row])
-            assert pwr != np.nan, f"load {name_on_sheet} has no power indicated"
+            if np.isnan(pwr):
+                raise ValueError(f"load {name_on_sheet} has no power indicated")
             if verbose:
                 print(
                     f"\t'{name_on_sheet}' draws {pwr}W on phase {phase} ('{load}' on the map)"

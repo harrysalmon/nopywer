@@ -143,15 +143,12 @@ def draw_cable_layer(project: QgsProject, grid: Dict, optim_edges: List):
 
 
 def _format_edges(grid: Dict, optim_edges: List):
+    if (nx is None) or (not isinstance(grid, nx.Graph)):
+        raise TypeError("_format_edges expects a NetworkX graph")
     optim_lines = []
-    is_graph = (nx is not None) and isinstance(grid, nx.Graph)
     for e in optim_edges:
-        if is_graph:
-            src = grid.nodes[e[0]].get("coordinates")
-            dst = grid.nodes[e[1]].get("coordinates")
-        else:
-            src = grid[e[0]]["coordinates"]
-            dst = grid[e[1]]["coordinates"]
+        src = grid.nodes[e[0]].get("coordinates")
+        dst = grid.nodes[e[1]].get("coordinates")
 
         optim_lines.append(
             {
@@ -188,11 +185,11 @@ if __name__ == "__main__":
     project = QgsProject.instance()
     project_file = param["project_file"]
     print(f"\nloading project {project_file}...")
-    assert os.path.isfile(project_file), (
-        f'the project file does not exists: "{project_file}"'
-    )
+    if not os.path.isfile(project_file):
+        raise ValueError(f'the project file does not exists: "{project_file}"')
     status = project.read(project_file)
-    assert status, f'unable to read project "{project_file}"'
+    if not status:
+        raise ValueError(f'unable to read project "{project_file}"')
 
     draw_point_layer(project)
     print("WARNING: update wont show when code ran from QGIS")

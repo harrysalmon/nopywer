@@ -8,8 +8,8 @@ They do not require QGIS project files, spreadsheets, or inventory files.
 import math
 import unittest
 
-import numpy as np
 import networkx as nx
+import numpy as np
 
 try:
     from tests.module_loader import import_nopywer_module, install_fake_qgis
@@ -21,30 +21,8 @@ install_fake_qgis()
 
 cumulate_current_mod = import_nopywer_module("cumulate_current")
 compute_voltage_drop_mod = import_nopywer_module("compute_voltage_drop")
-get_children_mod = import_nopywer_module("get_children")
+graph_model_mod = import_nopywer_module("graph_model")
 optimization_tools_mod = import_nopywer_module("optimization_tools")
-
-
-class DummyCable:
-    def __init__(self, *, nodes=None, r=0.0, current=None):
-        self.nodes = list(nodes or [])
-        self.r = float(r)
-        self.current = list(current or [])
-        self.vdrop_volts = 0.0
-
-
-class DummyNode:
-    def __init__(self, name, *, parent=None, power=None, cable=None):
-        self.name = name
-        self.parent = parent
-        self.children = {}
-        self.deepness = None
-        self.cables = []
-        self.cable = cable or {}
-        self.power = np.array(power if power is not None else [0.0, 0.0, 0.0], dtype=float)
-        self.cum_power = np.array([0.0, 0.0, 0.0], dtype=float)
-        self.voltage = 0.0
-        self.vdrop_percent = 0.0
 
 
 class MigrationConfidenceTests(unittest.TestCase):
@@ -94,47 +72,19 @@ class MigrationConfidenceTests(unittest.TestCase):
         self.assertAlmostEqual(G.nodes["a"]["vdrop_percent"], 100.0 * (230.0 - expected_v_a) / vdrop_ref)
         self.assertAlmostEqual(G.nodes["b"]["vdrop_percent"], 100.0 * (230.0 - expected_v_b) / vdrop_ref)
 
-    def test_get_children_builds_tree_and_deepness(self):
-        cables = {
-            "L": [
-                DummyCable(nodes=["generator", "a"]),
-                DummyCable(nodes=["a", "b"]),
-            ]
-        }
-        grid = {
-            "generator": DummyNode("generator", parent=None),
-            "a": DummyNode("a", parent=None),
-            "b": DummyNode("b", parent=None),
-        }
-        grid["generator"].cables = [{"layer": "L", "idx": 0}]
-        grid["a"].cables = [{"layer": "L", "idx": 0}, {"layer": "L", "idx": 1}]
-        grid["b"].cables = [{"layer": "L", "idx": 1}]
+    def test_graph_depth_and_bfs_contract(self):
+        G = nx.DiGraph()
+        G.add_edges_from([("generator", "a"), ("a", "b"), ("a", "c"), ("c", "d")])
 
-        grid, _ = get_children_mod.get_children("generator", grid, cables)
+        dlist = graph_model_mod.depth_list_from_graph(G, root="generator")
+        bfs = graph_model_mod.bfs_order(G, root="generator")
 
-        self.assertEqual(grid["generator"].deepness, 0)
-        self.assertEqual(grid["a"].deepness, 1)
-        self.assertEqual(grid["b"].deepness, 2)
-        self.assertEqual(grid["a"].parent, "generator")
-        self.assertEqual(grid["b"].parent, "a")
-        self.assertEqual(set(grid["generator"].children.keys()), {"a"})
-        self.assertEqual(set(grid["a"].children.keys()), {"b"})
-        self.assertEqual(grid["a"].children["b"]["cable"]["idx"], 1)
-
-    def test_get_children_detects_preexisting_children_as_loop(self):
-        cables = {"L": [DummyCable(nodes=["generator", "a"])]}
-        grid = {
-            "generator": DummyNode("generator", parent=None),
-            "a": DummyNode("a", parent=None),
-        }
-        grid["generator"].cables = [{"layer": "L", "idx": 0}]
-        grid["a"].cables = [{"layer": "L", "idx": 0}]
-        grid["generator"].children = {"a": {"cable": {"layer": "L", "idx": 0}}}
-
-        with self.assertRaises(ValueError) as ctx:
-            get_children_mod.get_children("generator", grid, cables)
-
-        self.assertIn("infinite loop", str(ctx.exception).lower())
+        self.assertEqual(dlist[0], ["generator"])
+        self.assertEqual(set(dlist[1]), {"a"})
+        self.assertEqual(set(dlist[2]), {"b", "c"})
+        self.assertEqual(set(dlist[3]), {"d"})
+        self.assertEqual(bfs[0], "generator")
+        self.assertEqual(set(bfs), {"generator", "a", "b", "c", "d"})
 
     def test_find_optimal_layout_enforces_tree_constraints_on_toy_graph(self):
         nodes = {

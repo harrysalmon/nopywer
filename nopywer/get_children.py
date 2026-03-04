@@ -1,3 +1,10 @@
+"""Legacy recursive tree builder for pre-graph data structures.
+
+Legacy note:
+- preserved for historical reference only.
+- graph-first runtime code should prefer NetworkX traversal helpers instead.
+"""
+
 import json  # print(json.dumps(cables_dict, sort_keys=True, indent=4))
 
 

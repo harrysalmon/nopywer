@@ -47,6 +47,11 @@ from qgis.core import QgsDistanceArea, QgsUnitTypes, QgsFeature
 from .get_layer import get_layer
 from .get_coordinates import get_coordinates
 from .core_objects import Cable, Node
+from .boundary_models import (
+    BoundaryValidationError,
+    CableFeatureBoundary,
+    LoadFeatureBoundary,
+)
 import traceback
 import logging
 import numpy as np
@@ -64,16 +69,14 @@ def get_load_name(load: QgsFeature) -> str:
     """Normalize and return the load name from a QGIS feature."""
     verbose = 0
 
-    load_name = load.attribute("name")
-    assert isinstance(load_name, str), (
-        "this should be a string containing the name of the load"
-    )
-
-    load_name = load_name.lower()
-    load_name = load_name.replace(
-        "\n", " "
-    )  # in case of some names on the map have a \n
-    load_name = load_name.replace("  ", " ")  # avoid double blanks
+    try:
+        load_name = LoadFeatureBoundary.model_validate(
+            {"name": load.attribute("name"), "coordinates": None}
+        ).name
+    except BoundaryValidationError as exc:
+        raise ValueError(
+            f"invalid load name on feature id={load.id()}: {exc}"
+        ) from exc
 
     if verbose:
         attrs = (
@@ -96,9 +99,10 @@ def get_cables_info(project, cables_layers_list, extra_cable_length) -> dict:
 
         # --- check cable CRS to measure distances
         # tips to mesure distance https://gis.stackexchange.com/questions/347802/calculating-elipsoidal-length-of-line-in-pyqgis
-        assert project.crs() == cable_layer.crs(), (
-            f"project CRS ({project.crs()}) does not match layer {cable_layer_name}'s CRS ({cable_layer.crs()}), stg is weird... "
-        )
+        if project.crs() != cable_layer.crs():
+            raise ValueError(
+                f"project CRS ({project.crs()}) does not match layer {cable_layer_name}'s CRS ({cable_layer.crs()})"
+            )
 
         qgsDist = QgsDistanceArea()
 
@@ -121,20 +125,30 @@ def get_cables_info(project, cables_layers_list, extra_cable_length) -> dict:
         # --- get info from each cable of the current cable layer
         for cable_idx, cable_qgis in enumerate(cable_layer.getFeatures()):
             cable_length = qgsDist.measureLength(cable_qgis.geometry())
-            assert cable_length > 0, (
-                f"in layer '{cable_layer}', cable_qgis {cable_idx + 1} has length = 0m. It should be deleted"
-            )
+            if cable_length <= 0:
+                raise ValueError(
+                    f"in layer '{cable_layer}', cable_qgis {cable_idx + 1} has length = 0m. It should be deleted"
+                )
 
             try:
-                # check attributes before getting them ?
-                cable_nopywer = Cable(
-                    length=cable_length + extra_cable_length,
-                    area=cable_qgis.attribute("area"),
-                    plugs_and_sockets=cable_qgis.attribute(r"plugs&sockets"),
+                validated = CableFeatureBoundary.model_validate(
+                    {
+                        "length": cable_length + extra_cable_length,
+                        "area": cable_qgis.attribute("area"),
+                        "plugs_and_sockets": cable_qgis.attribute(r"plugs&sockets"),
+                        "layer_name": cable_layer_name,
+                        "feature_id": cable_idx,
+                        "coordinates": get_coordinates(cable_qgis),
+                    }
                 )
-                cable_nopywer.coordinates = get_coordinates(cable_qgis)
-                cable_nopywer.layer_name = cable_layer_name
-                cable_nopywer.id = cable_idx
+                cable_nopywer = Cable(
+                    length=validated.length,
+                    area=validated.area,
+                    plugs_and_sockets=validated.plugs_and_sockets,
+                    coordinates=validated.coordinates,
+                    layer_name=validated.layer_name,
+                    id=validated.feature_id,
+                )
 
             except Exception as error:
                 raise ValueError(
@@ -158,9 +172,8 @@ def get_loads_info(project, loads_layers_list) -> dict:
             print(f"loads layer = {load_layer}")
 
         field = "name"
-        assert field in load_layer.fields().names(), (
-            f'layer "{load_layer_name}" does not have a field "{field}"'
-        )
+        if field not in load_layer.fields().names():
+            raise ValueError(f'layer "{load_layer_name}" does not have a field "{field}"')
 
         for load in load_layer.getFeatures():
             load_name = get_load_name(load)
@@ -172,7 +185,10 @@ def get_loads_info(project, loads_layers_list) -> dict:
 
             try:
                 load_pos = get_coordinates(load)
-                nodes_dict[load_name].coordinates = load_pos
+                validated = LoadFeatureBoundary.model_validate(
+                    {"name": load_name, "coordinates": load_pos}
+                )
+                nodes_dict[validated.name].coordinates = validated.coordinates
 
             except Exception:  # https://stackoverflow.com/questions/4990718/how-can-i-write-a-try-except-block-that-catches-all-exceptions/4992124#4992124
                 print(
@@ -195,7 +211,7 @@ def is_load_connected(cable, load, qgsDist):
     is_load_connected = dmin <= thres
     if is_load_connected and verbose:
         print(
-            f'\t\t in cable layer "{cable._layer_name}", cable {cable._id} is connected to "{load.name}"'
+            f'\t\t in cable layer "{cable.layer_name}", cable {cable.id} is connected to "{load.name}"'
         )
 
     return is_load_connected
@@ -215,8 +231,8 @@ def find_connections(
         for cable_layer in cables_dict.values():
             for cable in cable_layer:
                 if is_load_connected(cable, load, qgsDist):
-                    cables_dict[cable._layer_name][cable._id].nodes.append(load.name)
-                    load.cables.append({"layer": cable._layer_name, "idx": cable._id})
+                    cables_dict[cable.layer_name][cable.id].nodes.append(load.name)
+                    load.cables.append({"layer": cable.layer_name, "idx": cable.id})
 
         if verbose:
             if is_load_connected == 0:

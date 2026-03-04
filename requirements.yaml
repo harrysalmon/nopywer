@@ -12,3 +12,4 @@ odfpy=1.4.1
 pandas=2.2.2
 matplotlib=3.10.1
 networkx=3.4.2
+pydantic=2.6.2

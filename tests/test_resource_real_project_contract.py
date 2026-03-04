@@ -125,11 +125,8 @@ class RealProjectContractTests(unittest.TestCase):
         cls.optim_signature_sha256 = hashlib.sha256(sig.encode()).hexdigest()
 
     def test_real_main_contracts(self):
-        self.assertIn("generator", self.grid)
-        if hasattr(self.grid, "nodes"):
-            total_power = float(np.sum(self.grid.nodes["generator"]["cum_power"]))
-        else:
-            total_power = float(np.sum(self.grid["generator"].cum_power))
+        self.assertIn("generator", self.grid.nodes)
+        total_power = float(np.sum(self.grid.nodes["generator"]["cum_power"]))
         self.assertGreater(total_power, 80_000.0)
         self.assertLess(total_power, 100_000.0)
 

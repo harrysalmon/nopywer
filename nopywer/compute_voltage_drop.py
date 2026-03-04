@@ -1,16 +1,11 @@
 """Forward voltage-drop sweep on the graph runtime model."""
 
+from numbers import Real
+
+import networkx as nx
 import numpy as np
 
 from .get_constant_parameters import get_constant_parameters
-
-try:
-    import networkx as nx
-except Exception as exc:  # pragma: no cover - dependency import guard
-    nx = None
-    _NETWORKX_ERROR = exc
-else:
-    _NETWORKX_ERROR = None
 
 # vdrop threshold in %, above which a warning is printed
 THRESHOLD_PERCENT = 5
@@ -20,25 +15,51 @@ VDROP_REF = np.sqrt(3) * V0
 VDROP_COEF = 1
 
 
-def compute_voltage_drop(G, root: str = "generator"):
+def _validate_voltage_drop_inputs(G: nx.DiGraph, root: str):
+    """Validate graph shape and required edge attributes once, upfront."""
+    if not isinstance(G, nx.DiGraph):
+        raise TypeError("compute_voltage_drop expects a networkx.DiGraph")
+    if root not in G:
+        raise KeyError(f"root node '{root}' is missing from graph")
+
+    bfs_edges = list(nx.bfs_edges(G, root))
+    for parent, load in bfs_edges:
+        edge = G.edges[parent, load]
+        resistance = edge.get("resistance", None)
+        if (resistance is None) or isinstance(resistance, bool) or (
+            not isinstance(resistance, Real)
+        ):
+            raise KeyError(
+                f"edge ({parent}, {load}) must define numeric 'resistance'"
+            )
+
+        current = edge.get("current", None)
+        if (current is None) or (not isinstance(current, (list, tuple, np.ndarray))):
+            raise KeyError(
+                f"edge ({parent}, {load}) must define non-empty numeric 'current'"
+            )
+        if len(current) == 0:
+            raise ValueError(f"edge ({parent}, {load}) has empty 'current'")
+        if any(isinstance(v, bool) or (not isinstance(v, Real)) for v in current):
+            raise TypeError(f"edge ({parent}, {load}) has non-numeric 'current'")
+
+    return bfs_edges
+
+
+def compute_voltage_drop(G: nx.DiGraph, root: str = "generator") -> nx.DiGraph:
     """Compute per-edge voltage drop and per-node voltage on the graph.
 
     Args:
-        G: Directed graph with ``edge['resistance']`` and ``edge['current']``.
+        G: Directed graph with edge attributes:
+            - ``resistance``: real scalar
+            - ``current``: non-empty sequence of real values
         root: Root source node for traversal, typically ``generator``.
 
     Returns:
         The same graph instance with updated ``edge['vdrop_volts']``,
         ``node['voltage']``, and ``node['vdrop_percent']`` attributes.
     """
-    if nx is None:
-        raise ImportError(
-            f"networkx is required for compute_voltage_drop: {_NETWORKX_ERROR}"
-        )
-    if not isinstance(G, nx.Graph):
-        raise TypeError("compute_voltage_drop expects a NetworkX graph")
-    if root not in G:
-        return G
+    bfs_edges = _validate_voltage_drop_inputs(G, root)
 
     for node in G.nodes():
         G.nodes[node]["voltage"] = float(0.0)
@@ -47,15 +68,16 @@ def compute_voltage_drop(G, root: str = "generator"):
     G.nodes[root]["voltage"] = float(V0)
     G.nodes[root]["vdrop_percent"] = 0.0
 
-    for parent, load in nx.bfs_edges(G, root):
+    for parent, load in bfs_edges:
         edge = G.edges[parent, load]
-        resistance = float(edge.get("resistance", 0.0))
-        current = edge.get("current", []) or []
-        max_current = float(np.max(current)) if len(current) > 0 else 0.0
-        edge["vdrop_volts"] = float(VDROP_COEF * resistance * max_current)
+        resistance = edge["resistance"]
+        current = edge["current"]
+        max_current = np.max(current)
 
-        G.nodes[load]["voltage"] = float(G.nodes[parent]["voltage"] - edge["vdrop_volts"])
-        G.nodes[load]["vdrop_percent"] = float(
+        edge["vdrop_volts"] = VDROP_COEF * resistance * max_current
+
+        G.nodes[load]["voltage"] = G.nodes[parent]["voltage"] - edge["vdrop_volts"]
+        G.nodes[load]["vdrop_percent"] = (
             100 * (V0 - G.nodes[load]["voltage"]) / VDROP_REF
         )
 

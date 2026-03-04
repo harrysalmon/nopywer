@@ -1,7 +1,7 @@
 """
 Classification: RESOURCE-INDEPENDENT
 
-These tests validate representation invariants (dict vs Node) using synthetic
+These tests validate graph-first representation contracts using synthetic
 fixtures only. No external QGIS data files are required.
 """
 
@@ -10,6 +10,7 @@ import os
 import tempfile
 import unittest
 
+import networkx as nx
 import numpy as np
 
 try:
@@ -20,7 +21,6 @@ except ModuleNotFoundError:
 
 install_fake_qgis()
 
-core_objects_mod = import_nopywer_module("core_objects")
 optimization_tools_mod = import_nopywer_module("optimization_tools")
 from qgis.core import QgsPointXY
 
@@ -45,29 +45,19 @@ def _base_cases():
     }
 
 
-def build_dict_grid():
-    grid = {}
+def build_graph():
+    G = nx.DiGraph()
     for name, spec in _base_cases().items():
         x, y = spec["xy"]
-        grid[name] = {
-            "power": np.array(spec["power"], dtype=float),
-            "cum_power": np.array(spec["cum_power"], dtype=float),
-            "coordinates": QgsPointXY(x, y),
-        }
-    return grid
-
-
-def build_node_grid():
-    Node = core_objects_mod.Node
-    grid = {}
-    for name, spec in _base_cases().items():
-        x, y = spec["xy"]
-        node = Node(name=name)
-        node.power = np.array(spec["power"], dtype=float)
-        node.cum_power = np.array(spec["cum_power"], dtype=float)
-        node.coordinates = QgsPointXY(x, y)
-        grid[name] = node
-    return grid
+        G.add_node(
+            name,
+            power=np.array(spec["power"], dtype=float),
+            cum_power=np.array(spec["cum_power"], dtype=float),
+            coordinates=QgsPointXY(x, y),
+            x=float(x),
+            y=float(y),
+        )
+    return G
 
 
 def canonical_nodes(nodes):
@@ -82,8 +72,17 @@ def canonical_nodes(nodes):
     return out
 
 
-def canonical_edges(edges):
-    return sorted((u, v, round(float(d), 9)) for u, v, d in edges)
+def expected_nodes():
+    out = {}
+    for name, spec in _base_cases().items():
+        x, y = spec["xy"]
+        out[name] = {
+            "power": tuple(np.array(spec["power"], dtype=float).round(9)),
+            "cum_power": tuple(np.array(spec["cum_power"], dtype=float).round(9)),
+            "x": round(float(x), 9),
+            "y": round(float(y), 9),
+        }
+    return out
 
 
 def assert_arborescence(testcase, nodes, edges_final):
@@ -102,32 +101,28 @@ def assert_arborescence(testcase, nodes, edges_final):
 
 
 class RepresentationContractTests(unittest.TestCase):
-    def test_qgis2list_is_representation_invariant(self):
+    def test_qgis2list_graph_contract(self):
         with temp_cwd():
-            n_dict, e_dict = optimization_tools_mod.qgis2list(build_dict_grid())
-            n_node, e_node = optimization_tools_mod.qgis2list(build_node_grid())
+            nodes, edges = optimization_tools_mod.qgis2list(build_graph())
 
-        self.assertEqual(canonical_nodes(n_dict), canonical_nodes(n_node))
-        self.assertEqual(canonical_edges(e_dict), canonical_edges(e_node))
+        self.assertEqual(canonical_nodes(nodes), expected_nodes())
+        n = len(nodes)
+        self.assertEqual(len(edges), n * (n - 1))
+        self.assertTrue(all(src != dst for src, dst, _ in edges))
+        self.assertTrue(all(float(d) >= 0.0 for _, _, d in edges))
 
-        n = len(n_dict)
-        self.assertEqual(len(e_dict), n * (n - 1))
-        self.assertTrue(all(src != dst for src, dst, _ in e_dict))
+    def test_qgis2list_rejects_non_graph_input(self):
+        with self.assertRaises(TypeError):
+            optimization_tools_mod.qgis2list({"generator": {}})
 
-    def test_optimization_contract_is_representation_invariant(self):
+    def test_optimization_contract_on_graph_derived_nodes(self):
         with temp_cwd():
-            n_dict, e_dict = optimization_tools_mod.qgis2list(build_dict_grid())
-            n_node, e_node = optimization_tools_mod.qgis2list(build_node_grid())
+            nodes, edges = optimization_tools_mod.qgis2list(build_graph())
 
-        edges_final_dict = optimization_tools_mod.find_optimal_layout(n_dict, e_dict)
-        edges_final_node = optimization_tools_mod.find_optimal_layout(n_node, e_node)
-
-        assert_arborescence(self, n_dict, edges_final_dict)
-        assert_arborescence(self, n_node, edges_final_node)
-
-        cost_dict = sum(d for _, _, d in edges_final_dict)
-        cost_node = sum(d for _, _, d in edges_final_node)
-        self.assertAlmostEqual(cost_dict, cost_node, places=9)
+        edges_final = optimization_tools_mod.find_optimal_layout(nodes, edges)
+        assert_arborescence(self, nodes, edges_final)
+        cost = sum(d for _, _, d in edges_final)
+        self.assertAlmostEqual(cost, 3.0, places=9)
 
 
 if __name__ == "__main__":

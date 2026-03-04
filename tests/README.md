@@ -2,6 +2,7 @@
 
 ## Resource-Independent Tests
 These do **not** require project/resource files under `QGIS/` and are safe for fast migration checks.
+They validate graph-first runtime contracts and numerical invariants on synthetic fixtures.
 
 - `tests/test_migration_confidence.py`
 - `tests/test_representation_contract.py`
