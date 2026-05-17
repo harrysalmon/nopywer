@@ -48,7 +48,7 @@ def choose_cables(inventory_file: str, cables_dict: dict) -> None:
                 f"length {cable.length_m} m"
             )
 
-        n_phases = 3 if cable.plugs_and_sockets_a > 16 else 1
+        n_phases = cable.number_of_phases
 
         if verbose >= 2:
             logger.debug(f" n phases: {n_phases}")

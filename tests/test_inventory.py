@@ -6,7 +6,7 @@ from nopywer.inventory import (
     choose_cables,
     choose_distros,
 )
-from nopywer.models import Cable32A, PowerNode
+from nopywer.models import Cable, Cable32A, PowerNode
 
 
 def _write_ods(path: Path, sheet_name: str, data: pd.DataFrame) -> None:
@@ -45,6 +45,42 @@ def test_choose_cables_in_inventory_nominal_case(tmp_path, caplog):
     choose_cables(str(inventory_file), cables)
 
     assert "Reading cables inventory" in caplog.text
+    assert "generator-load_a" not in caplog.text
+
+
+def test_choose_cables_uses_stored_phase_count(tmp_path, caplog):
+    inventory_file = tmp_path / "cables_inventory.ods"
+    _write_ods(
+        inventory_file,
+        "cables",
+        pd.DataFrame(
+            [
+                {
+                    "number of phases": 1,
+                    "plugs&sockets [A]": 63.0,
+                    "section [mm2]": 16.0,
+                    "quantity": 1,
+                    "length [m]": 11.0,
+                }
+            ]
+        ),
+    )
+
+    cables = {
+        "c1": Cable(
+            id="c1",
+            length_m=10.0,
+            area_mm2=16.0,
+            plugs_and_sockets_a=63.0,
+            number_of_phases=1,
+            from_node="generator",
+            to_node="load_a",
+        )
+    }
+
+    caplog.set_level("INFO", logger="nopywer.inventory")
+    choose_cables(str(inventory_file), cables)
+
     assert "generator-load_a" not in caplog.text
 
 

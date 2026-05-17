@@ -120,7 +120,7 @@ def _compute_distro_requirements(grid: PowerGrid) -> None:
 
         if node.parent and len(node.parent) > 0:
             cable = grid.cables[node.cable_to_parent]
-            ph = "3P" if cable.plugs_and_sockets_a > 16 else "1P"
+            ph = f"{cable.number_of_phases}P"
             node.distro["in"] = f"{ph} {cable.plugs_and_sockets_a}A"
         elif node.is_generator:
             node.distro["in"] = "3P 125A"
@@ -129,7 +129,7 @@ def _compute_distro_requirements(grid: PowerGrid) -> None:
         if node.children:
             for cable_id in node.children.values():
                 cable = grid.cables[cable_id]
-                ph = "3P" if cable.plugs_and_sockets_a > 16 else "1P"
+                ph = f"{cable.number_of_phases}P"
                 desc = f"{ph} {cable.plugs_and_sockets_a}A"
                 node.distro["out"][desc] = node.distro["out"].get(desc, 0) + 1
 

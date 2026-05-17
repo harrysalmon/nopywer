@@ -1,3 +1,4 @@
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
@@ -5,6 +6,8 @@ from typing import ClassVar
 import numpy as np
 
 from .constants import PF, RHO_COPPER, V0
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -72,6 +75,7 @@ class Cable:
     length_m: float
     area_mm2: float = 2.5
     plugs_and_sockets_a: float = 16.0
+    number_of_phases: int = 1
     phase: int | str | list | None = None
 
     from_node: str = ""
@@ -91,6 +95,15 @@ class Cable:
             value = round(value, 2)
         super().__setattr__(name, value)
 
+    def __post_init__(self) -> None:
+        if self.number_of_phases == 1 and self.plugs_and_sockets_a > 32:
+            logger.warning(
+                "Cable %r is marked as 1-phase but has a %.0fA plugs-and-sockets rating; "
+                "single-phase cables above 32A are unusual and should be checked.",
+                self.id,
+                self.plugs_and_sockets_a,
+            )
+
     tier_cost: ClassVar[float] = 1.0
     num_phases: ClassVar[int] = 1
     max_current_a: ClassVar[int] = 16
@@ -101,9 +114,9 @@ class Cable:
 
     def to_geojson(self) -> dict:
         max_current = max(self.current_per_phase) if self.current_per_phase else 0.0
-        cum_power_w = max_current * V0 * PF * type(self).num_phases
+        cum_power_w = max_current * V0 * PF * self.number_of_phases
         cable_type = (
-            f"{type(self).num_phases}P {self.plugs_and_sockets_a:.0f}A — {self.area_mm2}mm²"
+            f"{self.number_of_phases}P {self.plugs_and_sockets_a:.0f}A — {self.area_mm2}mm²"
         )
         return {
             "type": "Feature",
@@ -119,6 +132,7 @@ class Cable:
                 "length_m": self.length_m,
                 "area_mm2": self.area_mm2,
                 "plugs_and_sockets_a": self.plugs_and_sockets_a,
+                "number_of_phases": self.number_of_phases,
                 "cable_type": cable_type,
                 "current_a": round(max_current, 1),
                 "cum_power_kw": round(cum_power_w / 1000, 2),
@@ -143,6 +157,7 @@ class Cable32A(Cable):
     max_current_a: ClassVar[int] = 32
     area_mm2: float = 6.0
     plugs_and_sockets_a: float = 32.0
+    number_of_phases: int = 3
 
 
 @dataclass
@@ -152,6 +167,7 @@ class Cable63A(Cable):
     max_current_a: ClassVar[int] = 63
     area_mm2: float = 16.0
     plugs_and_sockets_a: float = 63.0
+    number_of_phases: int = 3
 
 
 @dataclass
@@ -161,6 +177,7 @@ class Cable125A(Cable):
     max_current_a: ClassVar[int] = 125
     area_mm2: float = 35.0
     plugs_and_sockets_a: float = 125.0
+    number_of_phases: int = 3
 
 
 _CABLE_TYPES: list[type[Cable]] = [Cable16A, Cable32A, Cable63A, Cable125A]

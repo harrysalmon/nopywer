@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from pathlib import Path
 
 import numpy as np
@@ -32,6 +33,7 @@ _KNOWN_FEATURE_KEYS: frozenset[str] = frozenset(
         "phase",
         "area",
         "plugs&sockets",
+        "number_of_phases",
         "length",
         # widely-used metadata we ignore but recognise
         "type",
@@ -55,10 +57,33 @@ _KNOWN_FEATURE_KEYS: frozenset[str] = frozenset(
     }
 )
 
+_CABLE_TYPE_PHASE_RE = re.compile(r"^\s*([13])P\b")
+
 
 def _normalise_keys(props: dict) -> dict:
     """Return props with export-schema keys renamed to input-schema keys."""
     return {_EXPORT_KEY_ALIASES.get(k, k): v for k, v in props.items()}
+
+
+def _load_cable_number_of_phases(props: dict) -> int:
+    """Read cable phase count from explicit data or legacy display text."""
+    explicit = props.get("number_of_phases")
+    if explicit is not None:
+        try:
+            phases = int(explicit)
+        except (TypeError, ValueError):
+            phases = 1
+        if phases in (1, 3):
+            return phases
+
+    cable_type = props.get("cable_type")
+    if isinstance(cable_type, str):
+        match = _CABLE_TYPE_PHASE_RE.match(cable_type)
+        if match is not None:
+            return int(match.group(1))
+
+    plugs_and_sockets_a = float(props.get("plugs&sockets", 16.0) or 16.0)
+    return 3 if plugs_and_sockets_a > 16 else 1
 
 
 def load_geojson(source: str | Path | dict) -> tuple[dict[str, PowerNode], dict[str, Cable]]:
@@ -136,6 +161,7 @@ def load_geojson(source: str | Path | dict) -> tuple[dict[str, PowerNode], dict[
 
             area = float(props.get("area", 2.5) or 2.5)
             ps = float(props.get("plugs&sockets", 16.0) or 16.0)
+            number_of_phases = _load_cable_number_of_phases(props)
 
             length = float(props.get("length", 0) or 0)
             if length <= 0:
@@ -149,6 +175,7 @@ def load_geojson(source: str | Path | dict) -> tuple[dict[str, PowerNode], dict[
                 length_m=length,
                 area_mm2=area,
                 plugs_and_sockets_a=ps,
+                number_of_phases=number_of_phases,
                 phase=props.get("phase"),
                 from_coords=(coords[0][0], coords[0][1]),
                 to_coords=(coords[-1][0], coords[-1][1]),

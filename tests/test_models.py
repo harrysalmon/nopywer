@@ -58,10 +58,27 @@ def test_cable_to_geojson():
     assert props["length_m"] == 25.5
     assert props["area_mm2"] == 6.0
     assert props["plugs_and_sockets_a"] == 32.0
+    assert props["number_of_phases"] == 3
     assert props["cable_type"] == "3P 32A — 6.0mm²"
     assert props["current_a"] == 10.5
     assert props["cum_power_kw"] == 6.52
     assert props["vdrop_volts"] == 1.23
+
+
+def test_cable_to_geojson_uses_instance_phase_count():
+    """The cable's stored phase count controls display and power reporting."""
+    cable = Cable(
+        id="c1",
+        length_m=10.0,
+        plugs_and_sockets_a=63.0,
+        number_of_phases=1,
+        current_per_phase=[10.0],
+    )
+    props = cable.to_geojson()["properties"]
+
+    assert props["number_of_phases"] == 1
+    assert props["cable_type"] == "1P 63A — 2.5mm²"
+    assert props["cum_power_kw"] == 2.07
 
 
 def test_power_node_to_geojson():
@@ -156,6 +173,26 @@ def test_cable_rounds_on_set():
 
     cable.current_per_phase = [10.556, 10.556, 10.556]
     assert cable.current_per_phase == [10.56, 10.56, 10.56]
+
+
+def test_single_phase_cable_over_32a_warns(caplog):
+    caplog.set_level("WARNING", logger="nopywer.models")
+
+    Cable(id="c", length_m=10.0, plugs_and_sockets_a=63.0, number_of_phases=1)
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "1-phase" in warnings[0].getMessage()
+    assert "63A" in warnings[0].getMessage()
+
+
+def test_single_phase_cable_warning_boundary(caplog):
+    caplog.set_level("WARNING", logger="nopywer.models")
+
+    Cable(id="c1", length_m=10.0, plugs_and_sockets_a=32.0, number_of_phases=1)
+    Cable(id="c2", length_m=10.0, plugs_and_sockets_a=63.0, number_of_phases=3)
+
+    assert [r for r in caplog.records if r.levelname == "WARNING"] == []
 
 
 def test_power_node_rounds_on_set():

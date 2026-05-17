@@ -20,6 +20,15 @@ def _point_feature(name: str, **extra_props) -> dict:
     }
 
 
+def _line_feature(**props) -> dict:
+    """A minimal valid LineString feature with whatever properties given."""
+    return {
+        "type": "Feature",
+        "geometry": {"type": "LineString", "coordinates": [[0.0, 0.0], [0.001, 0.0]]},
+        "properties": props,
+    }
+
+
 def _fc(*features: dict) -> dict:
     return {"type": "FeatureCollection", "features": list(features)}
 
@@ -122,3 +131,36 @@ def test_recognised_export_keys_do_not_log(caplog):
         if r.levelno == logging.DEBUG and "not used by load_geojson" in r.getMessage()
     ]
     assert unknown_debugs == []
+
+
+def test_load_geojson_reads_explicit_cable_phase_count():
+    """`number_of_phases` is the authoritative cable phase-count field."""
+    _, cables = load_geojson(
+        _fc(
+            _line_feature(
+                plugs_and_sockets_a=63.0,
+                area_mm2=16.0,
+                length_m=10.0,
+                number_of_phases=1,
+            )
+        )
+    )
+
+    assert cables["cable_0"].plugs_and_sockets_a == 63.0
+    assert cables["cable_0"].number_of_phases == 1
+
+
+def test_load_geojson_reads_legacy_cable_type_phase_count():
+    """Old exports without `number_of_phases` still preserve 1P/3P cable type."""
+    _, cables = load_geojson(
+        _fc(
+            _line_feature(
+                plugs_and_sockets_a=63.0,
+                area_mm2=16.0,
+                length_m=10.0,
+                cable_type="1P 63A — 16.0mm²",
+            )
+        )
+    )
+
+    assert cables["cable_0"].number_of_phases == 1
