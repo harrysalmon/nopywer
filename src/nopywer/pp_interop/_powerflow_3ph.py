@@ -92,11 +92,17 @@ class Pandapower3phGrid:
             `net.asymmetric_load`. Contains the loads with an
             explicit `phase` (int or list) — these go to
             `pp.asymmetric_load` with per-leg P / Q.
-        source: the original `PowerGrid`. Kept as a back-reference
-            so callers debugging a converted grid can trace any
+        source: the original `PowerGrid`. A back-reference so a
+            caller at a REPL or in a notebook can trace any
             bus/load row back to the nopywer node it came from
-            without re-running the conversion. Not read or written
-            by `compute_power_flow_3ph` itself.
+            without re-running the conversion (use `bus_idx` /
+            `balanced_load_idx` / `asymmetric_load_idx` to map by
+            name). Mirrors `PandapowerGrid.source` for symmetry,
+            but unlike the balanced sibling — where
+            `compute_short_circuit` writes `i_sc_ka` back onto the
+            source nodes — nothing in this module writes to it; the
+            asymmetric results are returned in `PowerFlow3phResults`
+            instead.
 
     A given load name appears in **at most one** of
     `balanced_load_idx` / `asymmetric_load_idx`. The split is decided
