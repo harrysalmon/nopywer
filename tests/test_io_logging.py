@@ -8,6 +8,8 @@ surface those coercions so they cannot regress to silent behaviour.
 
 import logging
 
+import pytest
+
 from nopywer.io import load_geojson
 
 
@@ -37,8 +39,10 @@ def test_legacy_string_phase_marker_logs_a_warning(caplog):
     """A node whose `phase` is a string ("U"/"Y") triggers a WARNING.
 
     What: loading a Point feature with `phase: "U"` produces a
-    `logging.WARNING` naming the node and the marker, and the load
-    still succeeds with the load spread evenly across L1/L2/L3.
+    `logging.WARNING` (from the shared `normalise_phase_legs`
+    helper in `nopywer.models`) naming the node and the marker, and
+    the load still succeeds with the load spread evenly across
+    L1/L2/L3.
 
     Why it matters: `"U"` / `"Y"` are legacy sub-grid reporting
     markers with no electrical meaning. They look phase-like in the
@@ -46,7 +50,7 @@ def test_legacy_string_phase_marker_logs_a_warning(caplog):
     when reading a `runpp_3ph` result. The warning is the operator's
     only signal that the marker propagated as far as the loader.
     """
-    caplog.set_level(logging.WARNING, logger="nopywer.io")
+    caplog.set_level(logging.WARNING, logger="nopywer.models")
     nodes, _ = load_geojson(_fc(_point_feature("stage_left", phase="U")))
 
     # behaviour: still loads, treated as unphased
@@ -61,16 +65,69 @@ def test_legacy_string_phase_marker_logs_a_warning(caplog):
 
 
 def test_int_phase_emits_no_warning(caplog):
-    """A well-formed integer phase does not trigger the legacy-marker warning.
+    """A well-formed integer phase does not trigger any WARNING.
 
     What: loading a Point feature with `phase: 2` produces no
-    `WARNING`-level log records.
+    `WARNING`-level log records (across any logger).
 
-    Why it matters: the warning would lose meaning if it fired for
-    normal data. This test pins it as legacy-marker-specific.
+    Why it matters: warnings would lose meaning if they fired for
+    normal data. This test pins that ints 1-3 are the canonical form
+    and pass through silently.
     """
-    caplog.set_level(logging.WARNING, logger="nopywer.io")
+    caplog.set_level(logging.WARNING)
     load_geojson(_fc(_point_feature("ok", phase=2)))
+    assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+@pytest.mark.parametrize("bad_phase", [0, 4, -1, 5])
+def test_out_of_range_int_phase_logs_a_warning_and_balances_the_load(bad_phase, caplog):
+    """An int outside 1-3 surfaces a WARNING and the load distributes balanced.
+
+    What: loading a Point feature with `phase: 5` (or any int outside
+    1-3) produces a `WARNING` from `nopywer.models` and the load's
+    `power_per_phase` is spread evenly across L1/L2/L3, identical to
+    an unphased load.
+
+    Why it matters: before the `normalise_phase_legs` unification, an
+    out-of-range int would silently end up on `power_per_phase` as
+    balanced (the loader's `else` branch) — but downstream
+    `to_pandapower_3ph` would still treat it as an explicit phase and
+    route the load to the asymmetric table. The behaviour disagreed
+    across layers. The shared helper now coerces every layer to
+    "balanced", and the warning makes the silent coercion visible at
+    load time.
+    """
+    caplog.set_level(logging.WARNING, logger="nopywer.models")
+    nodes, _ = load_geojson(_fc(_point_feature("oops", phase=bad_phase)))
+
+    # behaviour: still loads, treated as balanced everywhere
+    assert nodes["oops"].power_per_phase.tolist() == [1000.0 / 3] * 3
+
+    # diagnostic: one warning naming the node and the value
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "oops" in warnings[0].getMessage()
+    assert str(bad_phase) in warnings[0].getMessage()
+
+
+def test_phase_list_splits_evenly_no_warning(caplog):
+    """A list `phase` like `[1, 2]` splits power across the listed legs silently.
+
+    What: loading a Point feature with `phase: [1, 2]` and a 1500 W
+    power leaves L1 and L2 carrying 750 W each, L3 zero — and emits
+    no `WARNING`-level records.
+
+    Why it matters: this is the canonical multi-phase load form. It
+    must pin two things at the loader: (1) the even split is the
+    documented per-leg semantics (any drift would silently change
+    every fixture using a list phase), and (2) the form is silent
+    — no warnings fire even though the same code path that warns on
+    malformed lists is exercised.
+    """
+    caplog.set_level(logging.WARNING)
+    nodes, _ = load_geojson(_fc(_point_feature("split", phase=[1, 2], power=1500.0)))
+
+    assert nodes["split"].power_per_phase.tolist() == [750.0, 750.0, 0.0]
     assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
 
 

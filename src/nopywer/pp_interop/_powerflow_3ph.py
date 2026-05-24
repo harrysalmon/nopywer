@@ -53,13 +53,12 @@ current rule), so it has no per-leg voltage to line up against
 exercise (doc 12), not a drop-in mirror of `compare_with_tree_walk`.
 """
 
-import logging
 import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from ..constants import PF, V0
-from ..models import PowerGrid
+from ..models import PowerGrid, normalise_phase_legs
 from . import config
 from ._conversion import _build_net_skeleton, _import_pandapower
 
@@ -67,8 +66,6 @@ if TYPE_CHECKING:
     from pandapower.auxiliary import pandapowerNet
 else:
     pandapowerNet = Any
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -114,44 +111,51 @@ class Pandapower3phGrid:
     asymmetric_load_idx: dict[str, int] = field(default_factory=dict)
 
 
-def _phase_split(phase: object, power_watts: float) -> tuple[float, float, float]:
+def _phase_split(
+    phase: object, power_watts: float, *, node_name: str = "<unnamed>"
+) -> tuple[float, float, float]:
     """Split a load's power across (L1, L2, L3) from its `phase` field.
 
-    Mirrors the per-phase rule used by `io.load_geojson` and
-    `phases._common._fixed_leg_seed`, so the conversion sees a load
-    exactly the way the rest of nopywer does:
+    Thin wrapper over `models.normalise_phase_legs`. The normaliser
+    is the single source of truth for what each `phase` form means;
+    this function turns its leg-list result into a per-leg watts
+    tuple shaped for `pp.create_asymmetric_load`.
+
+    Semantics (delegated to `normalise_phase_legs`):
 
       - `phase` is an int 1-3 — the whole load sits on that one leg.
       - `phase` is a list, e.g. `[1, 2]` — the load is split evenly
         across the listed legs (a 10 kW load on `[1, 2]` is 5 kW on
         L1, 5 kW on L2, nothing on L3).
       - anything else (the `"U"` / `"Y"` sub-grid markers, an empty
-        or malformed list, or `None`) — balanced: an even third on
-        each leg.
+        or malformed list, an out-of-range int, or `None`) — balanced:
+        an even third on each leg.
+
+    Non-canonical inputs surface as a WARNING from the normaliser, so
+    a programmer-introduced `phase=5` is no longer silently treated
+    as balanced.
 
     Note on `None`: `to_pandapower_3ph` routes `phase is None` loads
-    straight to `pp.load` and never calls this function for them.
-    The `None` branch is therefore purely defensive — it exists so
-    `_phase_split` is correct in isolation, e.g. for tests that
-    parametrise across every `phase` form.
+    straight to `pp.load` and never calls this function for them. The
+    balanced branch here exists so `_phase_split` is correct in
+    isolation, e.g. for tests that parametrise across every `phase`
+    form.
 
     Args:
         phase: the node's `phase` field, in any of its forms.
         power_watts: the load's total real power.
+        node_name: name forwarded to the normaliser's warnings.
 
     Returns:
         A `(p_l1, p_l2, p_l3)` tuple in watts that always sums to
         `power_watts`.
     """
-    if isinstance(phase, int) and 1 <= phase <= 3:
-        return tuple(power_watts if phase == i + 1 else 0.0 for i in range(3))
-    if isinstance(phase, list):
-        legs = [p for p in phase if isinstance(p, int) and 1 <= p <= 3]
-        if legs:
-            share = power_watts / len(legs)
-            return tuple(share if i + 1 in legs else 0.0 for i in range(3))
-    third = power_watts / 3
-    return (third, third, third)
+    legs = normalise_phase_legs(phase, node_name=node_name)
+    if not legs:
+        third = power_watts / 3
+        return (third, third, third)
+    share = power_watts / len(legs)
+    return tuple(share if i + 1 in legs else 0.0 for i in range(3))  # type: ignore[return-value]
 
 
 def to_pandapower_3ph(
@@ -219,26 +223,24 @@ def to_pandapower_3ph(
     net.ext_grid["r0x0_max"] = config.SOURCE_R0X0_MAX
     net.ext_grid["x0x_max"] = config.SOURCE_X0X_MAX
 
-    # loads, each into the right table by node.phase
+    # loads, each into the right table by node.phase.
+    #
+    # `normalise_phase_legs` is the single rule that decides what each
+    # `phase` form means. An empty list means "balanced — spread
+    # across all three legs", which is exactly the model
+    # `pp.create_load` represents under `runpp_3ph`. So the routing
+    # decision falls straight out of the normaliser's result:
+    # `legs == []` → balanced table; non-empty → asymmetric table.
+    # Legacy string markers and invalid ints (e.g. phase=5) are
+    # coerced to balanced inside the normaliser with a WARNING.
     balanced_load_idx: dict[str, int] = {}
     asymmetric_load_idx: dict[str, int] = {}
     tan_phi = math.tan(math.acos(load_pf)) if 0 < load_pf < 1 else 0.0
     for name, node in grid.nodes.items():
         if node.is_generator or node.power_watts <= 0:
             continue
-        # Legacy "U" / "Y" string markers have no electrical meaning;
-        # treat them the same as `phase is None` (balanced). Logged so
-        # the operator knows the marker propagated through to a solve.
-        is_balanced = node.phase is None or isinstance(node.phase, str)
-        if isinstance(node.phase, str):
-            logger.warning(
-                "Node %r carries legacy string phase marker %r; routing to "
-                "balanced pp.load. Phase markers should be int (1/2/3) or "
-                "list ([1, 2]) for runpp_3ph to use them.",
-                name,
-                node.phase,
-            )
-        if is_balanced:
+        legs = normalise_phase_legs(node.phase, node_name=name)
+        if not legs:
             p_mw = node.power_watts / 1e6
             balanced_load_idx[name] = pp.create_load(
                 net,
@@ -248,7 +250,8 @@ def to_pandapower_3ph(
                 name=name,
             )
         else:
-            p_l1, p_l2, p_l3 = _phase_split(node.phase, node.power_watts)
+            share = node.power_watts / len(legs)
+            p_l1, p_l2, p_l3 = tuple(share if i + 1 in legs else 0.0 for i in range(3))
             asymmetric_load_idx[name] = pp.create_asymmetric_load(
                 net,
                 bus=bus_idx[name],

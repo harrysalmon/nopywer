@@ -44,13 +44,10 @@ a list, or a string marker are left exactly as they are — the
 planner (or a previous run) has spoken.
 """
 
-import logging
 from dataclasses import dataclass
 
 from ...constants import PF, V0
-from ...models import Cable16A, PowerGrid
-
-logger = logging.getLogger(__name__)
+from ...models import Cable16A, PowerGrid, normalise_phase_legs
 
 # Most power a single-phase 16 A connection can carry: I x V x PF.
 # A load whose effective (usage-adjusted) power exceeds this cannot
@@ -199,22 +196,12 @@ def _fixed_leg_seed(grid: PowerGrid, candidate_names: set[str], usage_factor: fl
         if node.is_generator or node.power_watts <= 0 or name in candidate_names:
             continue
         effective_w = node.power_watts * usage_factor
-        phase = node.phase
-        if isinstance(phase, int) and 1 <= phase <= 3:
-            legs[phase - 1] += effective_w
-        elif isinstance(phase, list) and phase:
-            legs_used = [p for p in phase if isinstance(p, int) and 1 <= p <= 3]
+        legs_used = normalise_phase_legs(node.phase, node_name=name)
+        if legs_used:
+            share = effective_w / len(legs_used)
             for leg in legs_used:
-                legs[leg - 1] += effective_w / len(legs_used)
+                legs[leg - 1] += share
         else:
-            # balanced / unphased / string marker — spread evenly
-            if isinstance(phase, str):
-                logger.warning(
-                    "Node %r carries legacy string phase marker %r; treating "
-                    "as unphased (balanced across L1/L2/L3) in the leg seed.",
-                    name,
-                    phase,
-                )
             for i in range(3):
                 legs[i] += effective_w / 3
     return legs

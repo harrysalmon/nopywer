@@ -1,3 +1,4 @@
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
@@ -5,6 +6,94 @@ from typing import ClassVar
 import numpy as np
 
 from .constants import PF, RHO_COPPER, V0
+
+logger = logging.getLogger(__name__)
+
+
+def normalise_phase_legs(phase: object, *, node_name: str = "<unnamed>") -> list[int]:
+    """Canonical list of leg indices a `phase` field places a load on.
+
+    The single rule used everywhere a load's `phase` field is read:
+    `io.load_geojson`, `pp_interop._powerflow_3ph._phase_split` /
+    `to_pandapower_3ph`, and `pp_interop.phases._common._fixed_leg_seed`.
+    Centralising the rule prevents the three sites from drifting and
+    gives one place to log when the input is non-canonical.
+
+    Returns the legs the load occupies, as a list of `int` in 1-3:
+
+      - `1` / `2` / `3` → `[that int]`
+      - `[1, 2]` and any non-empty list with at least one valid leg →
+        the list filtered to valid ints in 1-3.
+      - `None`, a legacy `"U"` / `"Y"` string, an out-of-range int
+        (`0`, `4`, `-1`), or a list with no valid legs → `[]`,
+        meaning "balanced — spread evenly across all three legs".
+
+    Non-canonical inputs (strings, out-of-range ints, lists with no
+    valid legs) emit a `WARNING` naming `node_name` and the value, so
+    operators see that the value was coerced rather than honoured.
+
+    Args:
+        phase: the raw `phase` field, in any of its forms.
+        node_name: name of the node, used only for the warning
+            message. Defaults to `"<unnamed>"` for the rare callers
+            that don't have a name to hand (e.g. unit tests of the
+            helper itself).
+
+    Returns:
+        A new list of valid leg indices in 1-3, possibly empty.
+    """
+    # bool is a subclass of int in Python — exclude it before the int check
+    # so `phase=True` doesn't quietly mean "leg 1".
+    if isinstance(phase, bool):
+        logger.warning(
+            "Node %r has phase=%r (a bool, not an int leg index); treating "
+            "as unphased (balanced across L1/L2/L3). Valid phase forms are: "
+            "int 1/2/3 for a single leg, list like [1, 2] for a multi-phase "
+            "load, or None for an unphased / balanced load.",
+            node_name,
+            phase,
+        )
+        return []
+    if isinstance(phase, int):
+        if 1 <= phase <= 3:
+            return [phase]
+        logger.warning(
+            "Node %r has phase=%r outside the valid range 1-3; treating as "
+            "unphased (balanced across L1/L2/L3). Valid phase forms are: "
+            "int 1/2/3 for a single leg, list like [1, 2] for a multi-phase "
+            "load, or None for an unphased / balanced load.",
+            node_name,
+            phase,
+        )
+        return []
+    if isinstance(phase, list):
+        valid = [p for p in phase if isinstance(p, int) and not isinstance(p, bool) and 1 <= p <= 3]
+        if valid:
+            return valid
+        if phase:
+            logger.warning(
+                "Node %r has phase=%r with no valid legs (every element must "
+                "be an int in 1-3); treating as unphased (balanced across "
+                "L1/L2/L3).",
+                node_name,
+                phase,
+            )
+        return []
+    if isinstance(phase, str):
+        logger.warning(
+            "Node %r carries legacy string phase marker %r; treating as "
+            "unphased (balanced across L1/L2/L3). These markers ('U'/'Y') "
+            "named sub-grids in older fixtures and have no electrical "
+            "meaning — for runpp_3ph the load is routed to the balanced "
+            "pp.load table, not net.asymmetric_load. Strip the marker from "
+            "the fixture once the sub-grid reporting it came from is no "
+            "longer needed; replace it with an int leg (1/2/3) or list "
+            "([1, 2]) if you want the load on a specific leg.",
+            node_name,
+            phase,
+        )
+        return []
+    return []
 
 
 @dataclass

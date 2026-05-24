@@ -180,7 +180,8 @@ def test_to_3ph_routes_string_phase_marker_to_balanced_table_with_warning(caplog
 
     What: a load with `phase="U"` ends up in `net.load` (and
     `balanced_load_idx`), not `net.asymmetric_load`, and a single
-    `WARNING`-level log record names the node and the marker.
+    `WARNING`-level log record (now emitted by the shared
+    `normalise_phase_legs` helper) names the node and the marker.
 
     Why it matters: `"U"` / `"Y"` are sub-grid reporting markers
     with no electrical meaning. Routing them to `asymmetric_load`
@@ -194,7 +195,7 @@ def test_to_3ph_routes_string_phase_marker_to_balanced_table_with_warning(caplog
     import logging
 
     grid = _grid([("stage_left", 3000.0, "U")])
-    caplog.set_level(logging.WARNING, logger="nopywer.pp_interop._powerflow_3ph")
+    caplog.set_level(logging.WARNING, logger="nopywer.models")
 
     pp_grid = to_pandapower_3ph(grid)
 
@@ -207,6 +208,43 @@ def test_to_3ph_routes_string_phase_marker_to_balanced_table_with_warning(caplog
     assert len(warnings) == 1
     assert "stage_left" in warnings[0].getMessage()
     assert "'U'" in warnings[0].getMessage()
+
+
+@pytest.mark.parametrize("bad_phase", [0, 4, -1, 5, 100])
+def test_to_3ph_routes_out_of_range_int_phase_to_balanced_table_with_warning(bad_phase, caplog):
+    """An out-of-range int phase is routed to the balanced table with a WARNING.
+
+    What: a load with `phase=5` (or any int outside 1-3) lands in
+    `net.load` (and `balanced_load_idx`), not `net.asymmetric_load`,
+    and a `WARNING` naming the node and the invalid value is emitted.
+
+    Why it matters: before the `normalise_phase_legs` unification, an
+    invalid int slipped past `to_pandapower_3ph`'s `isinstance(phase,
+    str)` check and ended up as a `pp.create_asymmetric_load` with
+    three equal P's — numerically a balanced load but stored in the
+    asymmetric table, mislabelling it. A downstream inspector reading
+    `len(net.asymmetric_load)` to count "loads the planner phase-
+    assigned" would be off by one. Routing the decision through the
+    shared helper means an invalid int now produces (a) the correct
+    table placement, and (b) a visible warning so the bad value can
+    be fixed at source.
+    """
+    import logging
+
+    grid = _grid([("oops", 3000.0, bad_phase)])
+    caplog.set_level(logging.WARNING, logger="nopywer.models")
+
+    pp_grid = to_pandapower_3ph(grid)
+
+    assert "oops" in pp_grid.balanced_load_idx
+    assert "oops" not in pp_grid.asymmetric_load_idx
+    assert len(pp_grid.net.load) == 1
+    assert len(pp_grid.net.asymmetric_load) == 0
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "oops" in warnings[0].getMessage()
+    assert str(bad_phase) in warnings[0].getMessage()
 
 
 # --- compute_power_flow_3ph --------------------------------------------------
