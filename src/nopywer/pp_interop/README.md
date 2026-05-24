@@ -98,7 +98,7 @@ theory and findings behind these choices.
 | **GeoJSON** | A `FeatureCollection`. Points → `PowerNode`s with `name`, `power` (W), `phase` (`None` / `1` / `2` / `3` / `[1,2]` / `"U"` / `"Y"`), `is_generator`. LineStrings → cables with `id`, `length`/`length_m`, `area`/`area_mm2`, `plugs&sockets`/`plugs_and_sockets_a`. Either the hand-authored or the round-tripped export schema works (aliases handled in `io._EXPORT_KEY_ALIASES`). |
 | **Generator** | Exactly one node with `is_generator: true`. Its bus becomes the `ext_grid` slack. |
 | **Cable endpoints** | Cables must reference existing node names via `from_node` / `to_node`. The GeoJSON loader populates these by snapping; the converter raises `ValueError` if any are missing. |
-| **Per-load phase** | Only required for the **asymmetric** path. For balanced `to_pandapower` it's ignored. For `to_pandapower_3ph`, any load whose `phase` is an `int` or `list` becomes an `asymmetric_load`; `None` stays balanced. Legacy `"U"` / `"Y"` string markers have no electrical meaning and are coerced to balanced with a `WARNING` log line — see Logging below. Use the `phases` package to synthesise an assignment if your fixture arrives unphased. |
+| **Per-load phase** | Only required for the **asymmetric** path. For balanced `to_pandapower` it's ignored. For `to_pandapower_3ph`, any load whose `phase` normalises to one or more valid legs (int 1-3, or a list with at least one valid leg) becomes an `asymmetric_load`; everything else — `None`, legacy `"U"` / `"Y"` strings, out-of-range ints, malformed lists — coerces to balanced with a `WARNING` log line. The single normalisation rule lives in `models.normalise_phase_legs`; see Logging below for the full list of coercions. Use the `phases` package to synthesise an assignment if your fixture arrives unphased. |
 | **`usage_factor`** | **Required, keyword-only**, on every public function in `pp_interop.phases`. There is no default. Use `config.DEFAULT_USAGE_FACTOR` (0.5) as the project-wide reference if you want it. |
 | **Modelling constants** | All in `pp_interop/config.py`: generator rating (`GEN_SN_KVA`, `GEN_XDSS_PU`, `GEN_RX`), cable reactance (`X_OHM_PER_KM`), zero-sequence ratios (`R0_OVER_R1`, `X0_OVER_X1`), source earthing (`SOURCE_X0X_MAX`, `SOURCE_R0X0_MAX`), and `DEFAULT_USAGE_FACTOR`. All have working defaults. Generator and cable values are also exposed as kwargs on `to_pandapower(...)` / `to_pandapower_3ph(...)` for per-call overrides; zero-sequence and source-earthing values are read directly from `config` at conversion time and must be changed there. |
 | **Optional dep** | `uv sync --extra pandapower` — without it, `_import_pandapower` raises a clear `ImportError`. |
@@ -264,7 +264,7 @@ that meaning:
 | `io.load_geojson` | Sets `node.power_per_phase = [P/3, P/3, P/3]` for any tree-walk analysis downstream. |
 | `PowerNode.to_geojson` | **Omits** the `"phase"` key (not emitted as `null`). Reload is symmetric: missing key → `None`. |
 | `phases.single_phase_candidates` | `None` is the marker for "eligible to be planned". Any other `phase` (int / list / string) is treated as already-decided and left alone. |
-| `phases.apply_assignment` | When a plan assigns a leg, sets `node.phase = 1\|2\|3`. Does **not** recompute `power_per_phase` — that derived cache is stale until the grid is reloaded. The `phase` field is authoritative. |
+| `phases.apply_assignment` | When a plan assigns a leg, sets `node.phase = 1\|2\|3` AND rebuilds `node.power_per_phase` from `(power_watts, new_leg)` so the two coupled fields stay coherent. Important for `analyze.py`, which reads `power_per_phase` directly to compute cumulative power. |
 | `to_pandapower` (balanced) | Ignores `phase` entirely; every load is a balanced `pp.load`. |
 | `to_pandapower_3ph` (asymmetric) | `None` → `pp.load` in `balanced_load_idx`. `pp.runpp_3ph` treats `pp.load` as an even three-phase draw, so this is the correct primitive for unphased loads, not a workaround. |
 | `compute_power_flow_3ph` | An unphased load sags its three legs equally and contributes zero to neutral current (its three currents cancel in the return). Indistinguishable from a balanced motor. |
@@ -298,22 +298,32 @@ that's what an all-balanced grid genuinely is.
 
 ## Logging
 
-Three silent data coercions emit log records so they cannot regress
-to silent behaviour. Configure the standard `logging` module to see
+Silent data coercions emit log records so they cannot regress to
+silent behaviour. Configure the standard `logging` module to see
 them (`logging.basicConfig(level=logging.DEBUG)` for everything;
 `level=logging.WARNING` for just the loud ones).
 
 | Logger | Level | When it fires |
 |---|---|---|
-| `nopywer.io` | `WARNING` | A node's `phase` is a string (legacy `"U"` / `"Y"` sub-grid marker). The loader treats it as unphased and balances the load across all three legs. |
+| `nopywer.models` | `WARNING` | `normalise_phase_legs` saw a non-canonical `phase` value on a load and coerced it to balanced. Fires for: legacy `"U"` / `"Y"` string sub-grid markers; ints outside 1-3 (`0`, `4`, `-1`, …); lists with no valid legs (`[5, 9]`, `["x"]`); bool values (`True` / `False`). Each warning names the node and the offending value, and includes the canonical alternatives. |
+| `nopywer.io` | `WARNING` | `_pick_cable_class` saw a `plugs_and_sockets_a` rating outside the closed catalogue (16/32/63/125 A) and fell back to `Cable16A`; or the JSON carried an explicit `number_of_phases` that disagrees with the subclass picked from `plugs_and_sockets_a` (the subclass wins). |
 | `nopywer.io` | `DEBUG` | A feature carries property keys outside the known set — useful for catching typos (`powr` for `power`) without being noisy on legitimate computed export fields. |
-| `nopywer.pp_interop._powerflow_3ph` | `WARNING` | `to_pandapower_3ph` sees a string-marker `phase` on a load. The load is routed to the balanced `pp.load` table (not `pp.asymmetric_load`) since the marker has no per-leg semantics. |
-| `nopywer.pp_interop.phases._common` | `WARNING` | The phase-planning leg seed sees a string-marker `phase`. Treated as unphased in the leg totals; same justification as above. |
 
-The string-marker warnings are operator-actionable: they signal that
-a legacy reporting marker propagated through to the modelling layer.
-Strip the markers from the fixture once the sub-grid reporting they
-came from is no longer needed.
+All `phase`-related warnings originate from the shared
+`normalise_phase_legs` helper in `models.py` rather than from each
+call site. This means a single offending load surfaces one warning
+per call to a downstream consumer (loader, planning seed, 3ph
+converter) rather than one specially-worded warning per site;
+duplicate warnings on a full `load → plan → solve` pipeline are
+expected and intentional, so a programmer-introduced bad value
+(one that didn't come from JSON) is still caught at every layer it
+reaches.
+
+The phase warnings are operator-actionable: they signal that a
+non-canonical value propagated through to the modelling layer.
+Strip the markers from the fixture once the sub-grid reporting
+they came from is no longer needed; for bad ints / lists fix the
+value at source.
 
 ## Things to remember
 
