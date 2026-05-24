@@ -65,20 +65,22 @@ def test_cable_to_geojson():
     assert props["vdrop_volts"] == 1.23
 
 
-def test_cable_to_geojson_uses_instance_phase_count():
-    """The cable's stored phase count controls display and power reporting."""
-    cable = Cable(
-        id="c1",
-        length_m=10.0,
-        plugs_and_sockets_a=63.0,
-        number_of_phases=1,
-        current_per_phase=[10.0],
-    )
+def test_cable_to_geojson_uses_subclass_phase_count():
+    """The cable subclass dictates the exported phase count.
+
+    Cable types are a closed catalogue: a Cable16A is always 1-phase, a
+    Cable32A always 3-phase, etc. Per-instance phase overrides are not
+    representable — that's the whole point of the subclass-as-type
+    design. This test pins that `to_geojson` reads `num_phases` from
+    the class, not from any instance attribute.
+    """
+    cable = Cable63A(id="c1", length_m=10.0, current_per_phase=[10.0, 10.0, 10.0])
     props = cable.to_geojson()["properties"]
 
-    assert props["number_of_phases"] == 1
-    assert props["cable_type"] == "1P 63A — 2.5mm²"
-    assert props["cum_power_kw"] == 2.07
+    assert props["number_of_phases"] == 3
+    assert props["cable_type"] == "3P 63A — 16.0mm²"
+    # 10 A * 230 V * 0.9 PF * 3 phases = 6.21 kW
+    assert props["cum_power_kw"] == 6.21
 
 
 def test_power_node_to_geojson():
@@ -173,26 +175,6 @@ def test_cable_rounds_on_set():
 
     cable.current_per_phase = [10.556, 10.556, 10.556]
     assert cable.current_per_phase == [10.56, 10.56, 10.56]
-
-
-def test_single_phase_cable_over_32a_warns(caplog):
-    caplog.set_level("WARNING", logger="nopywer.models")
-
-    Cable(id="c", length_m=10.0, plugs_and_sockets_a=63.0, number_of_phases=1)
-
-    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-    assert len(warnings) == 1
-    assert "1-phase" in warnings[0].getMessage()
-    assert "63A" in warnings[0].getMessage()
-
-
-def test_single_phase_cable_warning_boundary(caplog):
-    caplog.set_level("WARNING", logger="nopywer.models")
-
-    Cable(id="c1", length_m=10.0, plugs_and_sockets_a=32.0, number_of_phases=1)
-    Cable(id="c2", length_m=10.0, plugs_and_sockets_a=63.0, number_of_phases=3)
-
-    assert [r for r in caplog.records if r.levelname == "WARNING"] == []
 
 
 def test_power_node_rounds_on_set():

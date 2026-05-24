@@ -133,8 +133,50 @@ def test_recognised_export_keys_do_not_log(caplog):
     assert unknown_debugs == []
 
 
-def test_load_geojson_reads_explicit_cable_phase_count():
-    """`number_of_phases` is the authoritative cable phase-count field."""
+def test_load_geojson_picks_cable_subclass_from_plugs_and_sockets():
+    """`plugs_and_sockets_a` dispatches to the right Cable subclass.
+
+    What: a LineString with `plugs_and_sockets_a=63.0` loads as a
+    `Cable63A`, whose `num_phases` ClassVar is 3.
+
+    Why it matters: cable types are a closed catalogue (16/32/63/125 A).
+    The loader's job is to pick the right subclass from JSON content,
+    not to instantiate a base `Cable` with arbitrary per-instance
+    fields. This pins the dispatch table.
+    """
+    from nopywer.models import Cable63A
+
+    _, cables = load_geojson(
+        _fc(
+            _line_feature(
+                plugs_and_sockets_a=63.0,
+                area_mm2=16.0,
+                length_m=10.0,
+            )
+        )
+    )
+
+    assert isinstance(cables["cable_0"], Cable63A)
+    assert cables["cable_0"].num_phases == 3
+
+
+def test_load_geojson_warns_when_explicit_phase_count_disagrees_with_subclass(caplog):
+    """A fixture phase count that disagrees with the subclass triggers a WARNING.
+
+    What: a LineString with `plugs_and_sockets_a=63.0` and
+    `number_of_phases=1` (an impossible combination — 63 A is always
+    3-phase) loads as a `Cable63A` (the subclass wins) and emits a
+    `WARNING` naming the cable and the disagreement.
+
+    Why it matters: round-tripped exports may carry an explicit
+    `number_of_phases`; if a hand-edited fixture sets it to something
+    impossible, silently ignoring it would mask the error. The warning
+    is the operator's signal that the fixture is internally
+    inconsistent.
+    """
+    from nopywer.models import Cable63A
+
+    caplog.set_level(logging.WARNING, logger="nopywer.io")
     _, cables = load_geojson(
         _fc(
             _line_feature(
@@ -146,21 +188,40 @@ def test_load_geojson_reads_explicit_cable_phase_count():
         )
     )
 
-    assert cables["cable_0"].plugs_and_sockets_a == 63.0
-    assert cables["cable_0"].number_of_phases == 1
+    assert isinstance(cables["cable_0"], Cable63A)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "cable_0" in warnings[0].getMessage()
+    assert "number_of_phases=1" in warnings[0].getMessage()
 
 
-def test_load_geojson_reads_legacy_cable_type_phase_count():
-    """Old exports without `number_of_phases` still preserve 1P/3P cable type."""
+def test_load_geojson_warns_on_unknown_plugs_and_sockets_rating(caplog):
+    """An unknown plugs-and-sockets rating falls back to Cable16A with a WARNING.
+
+    What: a LineString with `plugs_and_sockets_a=20.0` (not in the
+    closed catalogue 16/32/63/125) loads as a `Cable16A` and emits a
+    `WARNING` naming the cable and the unrecognised rating.
+
+    Why it matters: catalogues are closed by intent, but legacy or
+    hand-authored fixtures may carry odd values. Falling back instead
+    of raising lets the loader keep working; the warning makes the
+    coercion visible.
+    """
+    from nopywer.models import Cable16A
+
+    caplog.set_level(logging.WARNING, logger="nopywer.io")
     _, cables = load_geojson(
         _fc(
             _line_feature(
-                plugs_and_sockets_a=63.0,
-                area_mm2=16.0,
+                plugs_and_sockets_a=20.0,
+                area_mm2=4.0,
                 length_m=10.0,
-                cable_type="1P 63A — 16.0mm²",
             )
         )
     )
 
-    assert cables["cable_0"].number_of_phases == 1
+    assert isinstance(cables["cable_0"], Cable16A)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "cable_0" in warnings[0].getMessage()
+    assert "20" in warnings[0].getMessage()

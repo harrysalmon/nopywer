@@ -1,13 +1,12 @@
 import json
 import logging
-import re
 from pathlib import Path
 
 import numpy as np
 
 from .constants import EXTRA_CABLE_LENGTH_M, PF, V0
 from .geometry import geodesic_distance_m
-from .models import Cable, PowerNode
+from .models import Cable, Cable16A, Cable32A, Cable63A, Cable125A, PowerNode
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +56,16 @@ _KNOWN_FEATURE_KEYS: frozenset[str] = frozenset(
     }
 )
 
-_CABLE_TYPE_PHASE_RE = re.compile(r"^\s*([13])P\b")
+# Canonical catalogue: every supported cable type, keyed by its
+# plugs-and-sockets rating. The catalogue is closed — these are the
+# only cable types nopywer knows about, and the loader dispatches on
+# this map to pick the right subclass.
+_CABLE_CLASS_BY_PS: dict[int, type[Cable]] = {
+    16: Cable16A,
+    32: Cable32A,
+    63: Cable63A,
+    125: Cable125A,
+}
 
 
 def _normalise_keys(props: dict) -> dict:
@@ -65,25 +73,54 @@ def _normalise_keys(props: dict) -> dict:
     return {_EXPORT_KEY_ALIASES.get(k, k): v for k, v in props.items()}
 
 
-def _load_cable_number_of_phases(props: dict) -> int:
-    """Read cable phase count from explicit data or legacy display text."""
+def _pick_cable_class(props: dict, cable_id: str) -> type[Cable]:
+    """Pick the right Cable subclass from JSON properties.
+
+    Dispatches on `plugs_and_sockets_a` (after key normalisation, that
+    is `props["plugs&sockets"]`). Unknown ratings fall back to
+    `Cable16A` with a WARNING — the loader keeps loading, but the
+    operator gets a signal that the fixture is non-standard.
+
+    If JSON also carries an explicit `number_of_phases` that disagrees
+    with the subclass picked from `plugs_and_sockets_a`, log a WARNING
+    — the subclass wins, because cable types are a closed catalogue
+    and anomalous wirings aren't representable.
+    """
+    ps_raw = props.get("plugs&sockets", 16.0) or 16.0
+    try:
+        ps_int = int(float(ps_raw))
+    except (TypeError, ValueError):
+        ps_int = 16
+
+    cls = _CABLE_CLASS_BY_PS.get(ps_int)
+    if cls is None:
+        logger.warning(
+            "Cable %r has plugs_and_sockets_a=%s which does not match any "
+            "known cable type (16/32/63/125 A); falling back to Cable16A.",
+            cable_id,
+            ps_raw,
+        )
+        cls = Cable16A
+
     explicit = props.get("number_of_phases")
     if explicit is not None:
         try:
-            phases = int(explicit)
+            explicit_int = int(explicit)
         except (TypeError, ValueError):
-            phases = 1
-        if phases in (1, 3):
-            return phases
+            explicit_int = None
+        if explicit_int is not None and explicit_int != cls.num_phases:
+            logger.warning(
+                "Cable %r has number_of_phases=%s in the fixture but "
+                "plugs_and_sockets_a=%s implies %s (%dP); ignoring the "
+                "explicit phase count.",
+                cable_id,
+                explicit,
+                ps_raw,
+                cls.__name__,
+                cls.num_phases,
+            )
 
-    cable_type = props.get("cable_type")
-    if isinstance(cable_type, str):
-        match = _CABLE_TYPE_PHASE_RE.match(cable_type)
-        if match is not None:
-            return int(match.group(1))
-
-    plugs_and_sockets_a = float(props.get("plugs&sockets", 16.0) or 16.0)
-    return 3 if plugs_and_sockets_a > 16 else 1
+    return cls
 
 
 def load_geojson(source: str | Path | dict) -> tuple[dict[str, PowerNode], dict[str, Cable]]:
@@ -159,9 +196,10 @@ def load_geojson(source: str | Path | dict) -> tuple[dict[str, PowerNode], dict[
             if len(coords) < 2:
                 continue
 
+            cable_id = f"cable_{cable_counter}"
             area = float(props.get("area", 2.5) or 2.5)
             ps = float(props.get("plugs&sockets", 16.0) or 16.0)
-            number_of_phases = _load_cable_number_of_phases(props)
+            cable_cls = _pick_cable_class(props, cable_id)
 
             length = float(props.get("length", 0) or 0)
             if length <= 0:
@@ -170,12 +208,11 @@ def load_geojson(source: str | Path | dict) -> tuple[dict[str, PowerNode], dict[
                 )
             length += EXTRA_CABLE_LENGTH_M
 
-            cable = Cable(
-                id=f"cable_{cable_counter}",
+            cable = cable_cls(
+                id=cable_id,
                 length_m=length,
                 area_mm2=area,
                 plugs_and_sockets_a=ps,
-                number_of_phases=number_of_phases,
                 phase=props.get("phase"),
                 from_coords=(coords[0][0], coords[0][1]),
                 to_coords=(coords[-1][0], coords[-1][1]),

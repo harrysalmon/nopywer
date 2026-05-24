@@ -1,3 +1,11 @@
+"""Tests for the cable / distro inventory matchers.
+
+Every test in this module fabricates its own one- or two-row ODS file
+on the fly via `_write_ods`. There is no real inventory shipped in the
+repo; each test ships exactly the rows it needs to exercise one
+matching path, so the inventory contents are visible inline.
+"""
+
 from pathlib import Path
 
 import pandas as pd
@@ -6,10 +14,11 @@ from nopywer.inventory import (
     choose_cables,
     choose_distros,
 )
-from nopywer.models import Cable, Cable32A, PowerNode
+from nopywer.models import Cable32A, Cable63A, PowerNode
 
 
 def _write_ods(path: Path, sheet_name: str, data: pd.DataFrame) -> None:
+    """Write a synthetic inventory sheet for a single test to consume."""
     with pd.ExcelWriter(path, engine="odf") as writer:
         data.to_excel(writer, sheet_name=sheet_name, index=False)
 
@@ -48,7 +57,14 @@ def test_choose_cables_in_inventory_nominal_case(tmp_path, caplog):
     assert "generator-load_a" not in caplog.text
 
 
-def test_choose_cables_uses_stored_phase_count(tmp_path, caplog):
+def test_choose_cables_picks_phase_count_from_subclass(tmp_path, caplog):
+    """`choose_cables` reads `num_phases` from the cable subclass.
+
+    A Cable63A in the grid must match a 3-phase entry in the inventory.
+    Cable types are a closed catalogue — a 63 A cable is always 3-phase
+    — so this test exists to pin that the inventory matcher uses the
+    subclass's `num_phases` ClassVar, not any per-instance override.
+    """
     inventory_file = tmp_path / "cables_inventory.ods"
     _write_ods(
         inventory_file,
@@ -56,7 +72,7 @@ def test_choose_cables_uses_stored_phase_count(tmp_path, caplog):
         pd.DataFrame(
             [
                 {
-                    "number of phases": 1,
+                    "number of phases": 3,
                     "plugs&sockets [A]": 63.0,
                     "section [mm2]": 16.0,
                     "quantity": 1,
@@ -67,12 +83,9 @@ def test_choose_cables_uses_stored_phase_count(tmp_path, caplog):
     )
 
     cables = {
-        "c1": Cable(
+        "c1": Cable63A(
             id="c1",
             length_m=10.0,
-            area_mm2=16.0,
-            plugs_and_sockets_a=63.0,
-            number_of_phases=1,
             from_node="generator",
             to_node="load_a",
         )
