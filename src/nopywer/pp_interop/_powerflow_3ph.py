@@ -161,7 +161,11 @@ def _phase_split(
         third = power_watts / 3
         return (third, third, third)
     share = power_watts / len(legs)
-    return tuple(share if i + 1 in legs else 0.0 for i in range(3))  # type: ignore[return-value]
+    return (
+        share if 1 in legs else 0.0,
+        share if 2 in legs else 0.0,
+        share if 3 in legs else 0.0,
+    )
 
 
 def to_pandapower_3ph(
@@ -257,7 +261,9 @@ def to_pandapower_3ph(
             )
         else:
             share = node.power_watts / len(legs)
-            p_l1, p_l2, p_l3 = tuple(share if i + 1 in legs else 0.0 for i in range(3))
+            p_l1 = share if 1 in legs else 0.0
+            p_l2 = share if 2 in legs else 0.0
+            p_l3 = share if 3 in legs else 0.0
             asymmetric_load_idx[name] = pp.create_asymmetric_load(
                 net,
                 bus=bus_idx[name],
@@ -379,19 +385,27 @@ def compute_power_flow_3ph(pp_grid: Pandapower3phGrid) -> PowerFlow3phResults:
     net = pp_grid.net
 
     converged = bool(net["converged"])
-    vn_v = net.bus.iloc[0]["vn_kv"] * 1000.0
-    pn_v_at_nominal = vn_v / math.sqrt(3)
+    # Every bus is built at `config.VN_KV_LL` in `_build_net_skeleton`,
+    # so the P-N nominal is the project-wide constant — no need to
+    # round-trip through `net.bus.iloc[0]["vn_kv"]`. Using the config
+    # constant directly also means a future caller that mixes bus
+    # voltages won't silently pick up bus 0's rating as the global.
+    pn_v_at_nominal = config.VN_KV_LL * 1000.0 / math.sqrt(3)
 
     bus_voltage_v: dict[str, tuple[float, float, float]] = {}
     bus_vdrop_percent: dict[str, tuple[float, float, float]] = {}
     bus_unbalance_percent: dict[str, float] = {}
     for name, idx in pp_grid.bus_idx.items():
         row = net.res_bus_3ph.loc[idx]
-        legs = tuple(
-            round(float(row[f"vm_{ph}_pu"]) * pn_v_at_nominal, 2) for ph in ("a", "b", "c")
+        v_a = round(float(row["vm_a_pu"]) * pn_v_at_nominal, 2)
+        v_b = round(float(row["vm_b_pu"]) * pn_v_at_nominal, 2)
+        v_c = round(float(row["vm_c_pu"]) * pn_v_at_nominal, 2)
+        bus_voltage_v[name] = (v_a, v_b, v_c)
+        bus_vdrop_percent[name] = (
+            round(100.0 * (V0 - v_a) / V0, 3),
+            round(100.0 * (V0 - v_b) / V0, 3),
+            round(100.0 * (V0 - v_c) / V0, 3),
         )
-        bus_voltage_v[name] = legs
-        bus_vdrop_percent[name] = tuple(round(100.0 * (V0 - v) / V0, 3) for v in legs)
         unbalance = float(row["unbalance_percent"])
         # pandapower returns NaN for a bus with no load (0/0 sequence ratio).
         bus_unbalance_percent[name] = round(unbalance, 3) if unbalance == unbalance else 0.0
@@ -402,9 +416,10 @@ def compute_power_flow_3ph(pp_grid: Pandapower3phGrid) -> PowerFlow3phResults:
     for line_idx, line_row in net.line.iterrows():
         cable_id = line_row["name"]
         res = net.res_line_3ph.loc[line_idx]
-        line_current_a[cable_id] = tuple(
-            round(float(res[f"i_{ph}_ka"]) * 1000.0, 3) for ph in ("a", "b", "c")
-        )
+        i_a = round(float(res["i_a_ka"]) * 1000.0, 3)
+        i_b = round(float(res["i_b_ka"]) * 1000.0, 3)
+        i_c = round(float(res["i_c_ka"]) * 1000.0, 3)
+        line_current_a[cable_id] = (i_a, i_b, i_c)
         line_neutral_current_a[cable_id] = round(float(res["i_n_ka"]) * 1000.0, 3)
         line_loading_percent[cable_id] = round(float(res["loading_percent"]), 2)
 
