@@ -273,14 +273,27 @@ def apply_assignment(grid: PowerGrid, assignment: PhaseAssignment) -> None:
     effects: you can compute, compare, and discard `PhaseAssignment`s
     without ever changing the grid, then commit exactly one.
 
-    Only the candidate loads in `assignment.phases` are touched —
-    each has its `phase` set to the assigned int leg. Multi-phase
-    loads, pre-assigned loads, the generator, and zero-power nodes
-    are never in `phases` and so are left exactly as they were.
+    Only the candidate loads in `assignment.phases` are touched. For
+    each, the node's `phase` is set to the assigned leg AND the
+    node's `power_per_phase` array is rebuilt from
+    `(power_watts, new_phase)` using the same rule the loader uses,
+    so the two fields stay coherent. Multi-phase loads, pre-assigned
+    loads, the generator, and zero-power nodes are never in `phases`
+    and so are left exactly as they were.
 
-    Idempotent: applying the same assignment twice is a no-op the
-    second time. Applying it does *not* recompute `power_per_phase`
-    — that happens when the grid is next loaded or analysed.
+    Why the recompute: `power_per_phase` is populated by
+    `io.load_geojson` from `(power_watts, phase)`. The tree walk in
+    `analyze.py` reads it directly (it does not consult `phase`).
+    Setting `phase` alone after a planning run would leave
+    `power_per_phase` stale — still spread evenly across L1/L2/L3
+    even though the load is now declared single-leg — and any
+    in-process consumer (e.g. an `analyze` run before the next
+    write-and-reload) would walk wrong cumulative power. Rebuilding
+    here keeps the invariant "`power_per_phase` agrees with
+    `phase`" everywhere a planner runs.
+
+    Idempotent: applying the same assignment twice produces the
+    same state the second time.
 
     Args:
         grid: the grid to mutate. Must contain every node named in
@@ -294,4 +307,10 @@ def apply_assignment(grid: PowerGrid, assignment: PhaseAssignment) -> None:
             grid).
     """
     for name, leg in assignment.phases.items():
-        grid.nodes[name].phase = leg
+        node = grid.nodes[name]
+        node.phase = leg
+        # Rebuild power_per_phase from the new phase, matching
+        # io.load_geojson's distribution rule. Single int leg →
+        # whole power on that leg.
+        node.power_per_phase[:] = 0.0
+        node.power_per_phase[leg - 1] = node.power_watts

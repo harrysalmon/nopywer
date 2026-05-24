@@ -492,6 +492,76 @@ def test_apply_assignment_raises_on_unknown_node():
         apply_assignment(grid, stray)
 
 
+def test_apply_assignment_recomputes_power_per_phase_to_match_new_phase():
+    """`apply_assignment` rebuilds `power_per_phase` from the assigned leg.
+
+    What: a balanced load (loaded with `phase=None` so
+    `power_per_phase` is `[w/3, w/3, w/3]`) that gets assigned to leg
+    1 by a planner ends up with `phase == 1` AND
+    `power_per_phase == [w, 0, 0]` — the two fields agree after the
+    write-back.
+
+    Why it matters: `power_per_phase` is the field
+    `nopywer.analyze`'s tree walk reads to compute cumulative power.
+    `phase` is the field `pp_interop.phases` plans against and
+    `pp_interop._powerflow_3ph` routes by. They are populated
+    coherently at load time by `io.load_geojson`. Setting `phase`
+    alone after a plan would leave `power_per_phase` reporting the
+    pre-planning distribution — so an `analyze` run between apply
+    and reload would walk wrong cumulative power on every cable on
+    the way to the planner-assigned load. Pinning the rebuild here
+    prevents that silent staleness.
+    """
+    import numpy as np
+
+    grid = make_grid([("load", 3000.0, None)])
+    # Simulate what `io.load_geojson` would have done for a phase=None
+    # load: spread `power_watts` evenly across L1/L2/L3. `make_grid`
+    # builds PowerNodes directly and leaves `power_per_phase` at zero,
+    # so we recreate the post-load state explicitly here.
+    grid.nodes["load"].power_per_phase = np.array([1000.0, 1000.0, 1000.0])
+
+    # Manually construct a single-load assignment to leg 1 so the
+    # test is independent of which strategy picked which leg.
+    assignment = PhaseAssignment(
+        phases={"load": 1},
+        usage_factor=1.0,
+        leg_totals_w=(3000.0, 0.0, 0.0),
+        balance_pct=141.42,
+    )
+    apply_assignment(grid, assignment)
+
+    assert grid.nodes["load"].phase == 1
+    assert grid.nodes["load"].power_per_phase.tolist() == [3000.0, 0.0, 0.0]
+
+
+def test_apply_assignment_does_not_touch_power_per_phase_of_non_candidates():
+    """`apply_assignment` leaves `power_per_phase` of non-candidate loads alone.
+
+    What: applying a plan that names only `cand` leaves a
+    pre-assigned `preassigned` load's `power_per_phase` exactly as
+    `io.load_geojson` set it, untouched.
+
+    Why it matters: the `power_per_phase` rebuild added for
+    candidates must not bleed into other loads. A pre-phased load
+    already has the right `power_per_phase`; rewriting it would be
+    redundant at best and could mask a bug at worst (e.g. a load
+    whose `phase` and `power_per_phase` were deliberately set to
+    disagree for a specific test). This pins the candidate-only
+    blast radius of the rebuild.
+    """
+    grid = make_grid(
+        [("cand", 2000.0, None), ("preassigned", 2000.0, 3)],
+        gen_power=1000.0,
+    )
+    preassigned_pre = grid.nodes["preassigned"].power_per_phase.tolist()
+    assignment = assign_greedy(grid, usage_factor=1.0)
+
+    apply_assignment(grid, assignment)
+
+    assert grid.nodes["preassigned"].power_per_phase.tolist() == preassigned_pre
+
+
 # --- defaults ----------------------------------------------------------------
 
 

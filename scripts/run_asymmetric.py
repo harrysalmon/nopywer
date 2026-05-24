@@ -123,13 +123,22 @@ def _nameplate_total_w(grid: PowerGrid) -> float:
 def _scale_loads_in_place(grid: PowerGrid, factor: float) -> None:
     """Multiply every non-generator load's nameplate power by `factor`.
 
-    Mutates `node.power_watts` directly. Done after planning so the
-    planner sees unmodified nameplate; done before conversion so the
-    solver sees the scaled values.
+    Mutates `node.power_watts` AND `node.power_per_phase` in lock-step
+    so the two fields stay coherent — same invariant as the rebuild
+    in `pp_interop.phases._common.apply_assignment`. The solvers
+    (`to_pandapower` / `to_pandapower_3ph`) read `power_watts`, so
+    scaling only that field would keep the script's flow correct, but
+    anything downstream reading `power_per_phase` (e.g. a future
+    `--save` that round-trips through `to_geojson`) would silently
+    see unscaled per-leg values.
+
+    Done after planning so the planner sees unmodified nameplate;
+    done before conversion so the solver sees the scaled values.
     """
     for node in grid.nodes.values():
         if not node.is_generator:
             node.power_watts *= factor
+            node.power_per_phase *= factor
 
 
 def main(argv: list[str] | None = None) -> int:
