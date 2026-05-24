@@ -28,6 +28,7 @@ from nopywer.pp_interop import (
     PowerFlow3phResults,
     compute_power_flow_3ph,
     config,
+    to_pandapower,
     to_pandapower_3ph,
 )
 from nopywer.pp_interop._powerflow_3ph import _phase_split
@@ -135,6 +136,36 @@ def test_to_3ph_sets_zero_sequence_line_params():
     assert line["r0_ohm_per_km"] == pytest.approx(line["r_ohm_per_km"] * config.R0_OVER_R1)
     assert line["x0_ohm_per_km"] == pytest.approx(line["x_ohm_per_km"] * config.X0_OVER_X1)
     assert line["c0_nf_per_km"] == config.C0_NF_PER_KM
+
+
+def test_to_3ph_zero_sequence_ratios_pick_up_config_overrides(monkeypatch):
+    """The converter actually reads `config.R0_OVER_R1` at call time.
+
+    What: monkeypatching `config.R0_OVER_R1` from 4.0 to 7.0 (the
+    "reduced-section neutral" value in the config docstring) and
+    re-running `to_pandapower_3ph` produces lines whose `r0` is 7×
+    `r1`, not 4× `r1`. The base assertion uses literal `7.0` so the
+    test is not tautological — overriding both sides of an equality
+    in the same statement would pass even if the code stopped
+    reading the constant entirely.
+
+    Why it matters: the original parameter test (above) compares
+    `r0` against `r_ohm_per_km * config.R0_OVER_R1`. That asserts
+    the formula but not that the code consults the named constant
+    at the right time. A refactor that hard-coded 4.0 inside the
+    converter would still pass the formula test. This monkeypatch
+    pins the actual wiring — change the config, the converter
+    changes — which is what makes the constant a real operator-
+    tunable knob and not just documentation.
+    """
+    monkeypatch.setattr(config, "R0_OVER_R1", 7.0)
+    monkeypatch.setattr(config, "X0_OVER_X1", 7.0)
+
+    grid = _grid([("load", 3000.0, None)])
+    line = to_pandapower_3ph(grid).net.line.iloc[0]
+
+    assert line["r0_ohm_per_km"] == pytest.approx(line["r_ohm_per_km"] * 7.0)
+    assert line["x0_ohm_per_km"] == pytest.approx(line["x_ohm_per_km"] * 7.0)
 
 
 def test_to_3ph_sets_source_vector_group():
@@ -355,6 +386,126 @@ def test_results_helpers_find_worst_leg_and_neutral():
     # heavy_l2's feeder carries the most neutral current
     assert cid == "c1"
     assert current == max(res.line_neutral_current_a.values())
+
+
+def test_two_leg_list_phase_loads_both_listed_legs_and_not_the_third():
+    """A `phase=[1, 2]` load draws current on L1 and L2, ~none on L3.
+
+    What: a single 8 kW load with `phase=[1, 2]` converges. The
+    cable's L1 and L2 currents are both large and roughly equal in
+    magnitude (the power split is even by spec — 4 kW + 4 kW); the
+    L3 current is essentially zero; the neutral carries a nonzero
+    imbalance current.
+
+    Why it matters: the multi-phase list form (`[1, 2]`) was unit-
+    tested at `_phase_split` but had no integration test through the
+    full solver. This is the missing end-to-end pin: the converter
+    builds an `asymmetric_load` with `P_a = P_b = 4 kW, P_c = 0`,
+    `runpp_3ph` solves it, and the per-leg currents reflect the
+    "even split across the listed legs" semantics.
+
+    A note on what we do NOT assert: L1 and L2 do NOT sit at equal
+    voltage. Phase-A and phase-B currents differ by 120° in their
+    fundamental phase angle, so even with equal magnitudes they
+    couple back through line and zero-sequence impedances to give
+    L1 and L2 different per-leg voltages at the load bus. (This is
+    the same physics as the single-phase test's note about the two
+    *unloaded* legs not being equal — asymmetric loading produces
+    a genuinely asymmetric bus voltage, which is precisely what
+    `runpp_3ph` exists to surface.) The currents, however, are
+    bounded by power conservation across the cable and so can be
+    compared by magnitude.
+    """
+    grid = _grid([("split", 8000.0, [1, 2])])
+    res = compute_power_flow_3ph(to_pandapower_3ph(grid))
+
+    assert res.converged
+
+    i_l1, i_l2, i_l3 = res.line_current_a["c0"]
+    # both loaded legs carry real current
+    assert i_l1 > 5  # well above the noise floor
+    assert i_l2 > 5
+    # the two-leg power split is even, so currents are comparable
+    assert i_l1 == pytest.approx(i_l2, rel=0.1)
+    # L3 carries essentially no current
+    assert i_l3 == pytest.approx(0.0, abs=0.5)
+    # the two-leg imbalance returns on the neutral
+    assert res.line_neutral_current_a["c0"] > 0
+
+
+def test_balanced_and_3ph_converters_produce_independent_nets():
+    """`to_pandapower` and `to_pandapower_3ph` share no state.
+
+    What: converting the same source grid through both converters
+    yields two `pandapowerNet`s. Mutating one (e.g. dropping a load
+    from `net.load`) leaves the other unchanged.
+
+    Why it matters: both module docstrings claim the two converters
+    return independent nets and do not mutate each other's output.
+    Nothing was pinning that promise. A future shared cache or a
+    refactor that lifted a net into a module-level singleton would
+    silently violate it. This test catches that.
+    """
+    grid = _grid([("a", 3000.0, 1), ("b", 2000.0, None)])
+
+    balanced = to_pandapower(grid)
+    asymmetric = to_pandapower_3ph(grid)
+
+    # genuinely separate net objects
+    assert balanced.net is not asymmetric.net
+
+    # mutating one does not touch the other
+    n_loads_before = len(asymmetric.net.load)
+    balanced.net.load.drop(balanced.net.load.index[0], inplace=True)
+    assert len(asymmetric.net.load) == n_loads_before
+
+    # and vice versa
+    n_lines_before = len(balanced.net.line)
+    asymmetric.net.line.drop(asymmetric.net.line.index[0], inplace=True)
+    assert len(balanced.net.line) == n_lines_before
+
+
+def test_unbalance_percent_is_never_nan_in_results(monkeypatch):
+    """`compute_power_flow_3ph` translates pandapower's NaN unbalance to 0.0.
+
+    What: when `res_bus_3ph.unbalance_percent` carries a `NaN` (which
+    pandapower returns for buses with no load — `|V_neg| / |V_pos|`
+    is 0/0 there), the result's `bus_unbalance_percent[name]` is
+    `0.0`, not `NaN`. Verified by monkeypatching pandapower's
+    `runpp_3ph` to write a `NaN` into the result table directly, so
+    the test is independent of whatever real grid shape would
+    naturally produce a NaN.
+
+    Why it matters: pandapower documents the NaN behaviour but
+    a caller iterating unbalance figures shouldn't have to
+    special-case it. The coercion at `_powerflow_3ph.py:388` is the
+    one place that translation happens; this test pins it.
+    """
+    import math
+
+    import numpy as np
+    import pandapower as pp
+
+    grid = _grid([("a", 3000.0, 1)])
+    pp_grid = to_pandapower_3ph(grid)
+
+    real_runpp_3ph = pp.runpp_3ph
+
+    def runpp_3ph_with_nan(net, *args, **kwargs):
+        real_runpp_3ph(net, *args, **kwargs)
+        # Write a NaN into every bus's unbalance after the solve so
+        # the coercion in compute_power_flow_3ph has something to
+        # translate.
+        net.res_bus_3ph["unbalance_percent"] = np.nan
+
+    monkeypatch.setattr(pp, "runpp_3ph", runpp_3ph_with_nan)
+
+    res = compute_power_flow_3ph(pp_grid)
+
+    # every bus's unbalance is a clean 0.0, not NaN
+    for name, val in res.bus_unbalance_percent.items():
+        assert val == 0.0, f"bus {name!r} reported NaN-derived unbalance {val!r}"
+        assert not math.isnan(val)
 
 
 def test_results_helpers_return_none_on_empty():

@@ -619,6 +619,59 @@ def test_strategies_run_on_field_export_and_greedy_balances_better():
     assert greedy.balance_pct < rr.balance_pct
 
 
+def test_phase_field_round_trips_for_every_polymorphic_form(tmp_path):
+    """Every form of `PowerNode.phase` survives a to_geojson/load_geojson round-trip.
+
+    What: a grid with one int-phase, one list-phase, one string-marker
+    and one None-phase load is written via `to_geojson` and reloaded
+    via `load_geojson`; on the reloaded grid each node carries the
+    same `phase` value it started with (None still absent rather than
+    present-as-null, int as int, list as list, string as string).
+
+    Why it matters: `PowerNode.to_geojson` and `io.load_geojson` are
+    the round-trip pair for the polymorphic `phase` field. Any one
+    of these forms silently dropping at export or load would let a
+    fixture-edit / commit / reload cycle lose phase data — most
+    obviously when committing a planner output, but also for fixtures
+    that hand-author multi-phase lists or carry legacy string
+    markers. The existing planner round-trip test covers the int
+    form (the only one a strategy can produce); this test covers
+    the other forms that real fixtures already carry.
+    """
+    import json
+
+    from nopywer.io import load_geojson
+
+    # Build a grid by hand to control every node's phase form.
+    generator = PowerNode(name="gen", lon=0.0, lat=0.0, is_generator=True)
+    int_node = PowerNode(name="int_load", lon=0.001, lat=0.0, power_watts=1000.0, phase=2)
+    list_node = PowerNode(name="list_load", lon=0.002, lat=0.0, power_watts=1500.0, phase=[1, 2])
+    str_node = PowerNode(name="str_load", lon=0.003, lat=0.0, power_watts=900.0, phase="U")
+    none_node = PowerNode(name="none_load", lon=0.004, lat=0.0, power_watts=600.0, phase=None)
+    grid = PowerGrid(
+        nodes={
+            "gen": generator,
+            "int_load": int_node,
+            "list_load": list_node,
+            "str_load": str_node,
+            "none_load": none_node,
+        },
+        cables={},
+    )
+
+    # Round-trip via file (matches the canonical phase_geojson workflow).
+    out_path = tmp_path / "round_trip.geojson"
+    with open(out_path, "w") as f:
+        json.dump(grid.to_geojson(), f)
+    reloaded_nodes, _ = load_geojson(out_path)
+
+    assert reloaded_nodes["int_load"].phase == 2
+    assert reloaded_nodes["list_load"].phase == [1, 2]
+    assert reloaded_nodes["str_load"].phase == "U"
+    # None is the absent-from-export sentinel and reloads as None.
+    assert reloaded_nodes["none_load"].phase is None
+
+
 def test_phase_assignment_round_trips_through_geojson(tmp_path):
     """Planned phases survive a `to_geojson` → `load_geojson` cycle.
 
