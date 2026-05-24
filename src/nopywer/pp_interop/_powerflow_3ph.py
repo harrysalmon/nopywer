@@ -158,14 +158,19 @@ def _phase_split(
     """
     legs = normalise_phase_legs(phase, node_name=node_name)
     if not legs:
+        # Balanced: a third of the power on each of L1, L2, L3.
         third = power_watts / 3
         return (third, third, third)
+    # Asymmetric: split power evenly across the listed legs (1, 2 or
+    # 3 of them) and leave any unlisted leg at zero. Write only the
+    # populated slots — no need to check "is leg N in the list?" for
+    # every possible N when `legs` already tells us exactly where to
+    # put power.
     share = power_watts / len(legs)
-    return (
-        share if 1 in legs else 0.0,
-        share if 2 in legs else 0.0,
-        share if 3 in legs else 0.0,
-    )
+    p = [0.0, 0.0, 0.0]
+    for leg in legs:
+        p[leg - 1] = share
+    return (p[0], p[1], p[2])
 
 
 def to_pandapower_3ph(
@@ -260,10 +265,14 @@ def to_pandapower_3ph(
                 name=name,
             )
         else:
+            # Split power evenly across the listed legs; unlisted
+            # legs stay at zero. Same pattern as `_phase_split` —
+            # write only the populated slots.
             share = node.power_watts / len(legs)
-            p_l1 = share if 1 in legs else 0.0
-            p_l2 = share if 2 in legs else 0.0
-            p_l3 = share if 3 in legs else 0.0
+            p = [0.0, 0.0, 0.0]
+            for leg in legs:
+                p[leg - 1] = share
+            p_l1, p_l2, p_l3 = p
             asymmetric_load_idx[name] = pp.create_asymmetric_load(
                 net,
                 bus=bus_idx[name],
