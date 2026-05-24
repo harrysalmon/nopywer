@@ -24,5 +24,9 @@ jobs:
       - uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098  # v7.3.1
         with:
           enable-cache: true
-      - run: uv sync --frozen
+      # Install with the `pandapower` extra so the pp_interop tests
+      # actually execute. Without the extra they all
+      # `pytest.importorskip` and silently pass, leaving the bulk of
+      # this branch's surface uncovered in CI.
+      - run: uv sync --frozen --extra pandapower
       - run: uv run pytest -v
